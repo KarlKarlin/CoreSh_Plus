@@ -1,0 +1,1032 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Problem Monitoring Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary-color: #4e73df;
+            --success-color: #1cc88a;
+            --info-color: #36b9cc;
+            --warning-color: #f6c23e;
+            --danger-color: #e74a3b;
+        }
+        body {
+            background-color: #f8f9fc;
+            padding-top: 1rem;
+        }
+        .dashboard-header {
+            border-bottom: 1px solid #e3e6f0;
+            padding-bottom: 1rem;
+            margin-bottom: 1rem;
+        }
+        .stat-card {
+            border-left: 0.25rem solid;
+            transition: transform 0.3s;
+        }
+        .stat-card:hover {
+            transform: translateY(-3px);
+        }
+        .stat-card.primary { border-left-color: var(--primary-color); }
+        .stat-card.success { border-left-color: var(--success-color); }
+        .stat-card.info { border-left-color: var(--info-color); }
+        .problem-card {
+            border-left: 3px solid var(--primary-color);
+            transition: all 0.2s;
+        }
+        .problem-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0.15rem 0.5rem rgba(58, 59, 69, 0.1);
+        }
+        .comment-box {
+            background-color: #f8f9fc;
+            border-left: 3px solid var(--info-color);
+            border-radius: 0.25rem;
+            padding: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+        .chart-container {
+            position: relative;
+            height: 300px;
+            width: 100%;
+        }
+        .badge-conditional {
+            background-color: var(--info-color);
+            color: white;
+        }
+        .cursor-pointer { cursor: pointer; }
+        .service-state-card {
+            border-radius: 0.5rem;
+            transition: all 0.3s;
+            margin-bottom: 1rem;
+        }
+        .service-state-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.1);
+        }
+        .state-healthy { background-color: rgba(28, 200, 138, 0.1); border-left: 4px solid var(--success-color); }
+        .state-warning { background-color: rgba(246, 194, 62, 0.1); border-left: 4px solid var(--warning-color); }
+        .state-critical { background-color: rgba(231, 74, 59, 0.1); border-left: 4px solid var(--danger-color); }
+        .state-unknown { background-color: rgba(108, 117, 125, 0.1); border-left: 4px solid #6c757d; }
+        .state-error { background-color: rgba(108, 117, 125, 0.1); border-left: 4px solid #6c757d; }
+        .refresh-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+        }
+        .log-entry {
+            font-family: monospace;
+            font-size: 0.85rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            margin-bottom: 0.25rem;
+            background-color: #f8f9fa;
+            border-left: 3px solid #dee2e6;
+        }
+        .log-entry.error {
+            background-color: #f8d7da;
+            border-left-color: var(--danger-color);
+        }
+        .log-entry.warning {
+            background-color: #fff3cd;
+            border-left-color: var(--warning-color);
+        }
+        .log-entry.info {
+            background-color: #e7f1ff;
+            border-left-color: var(--info-color);
+        }
+        .log-timestamp {
+            color: #6c757d;
+            font-weight: bold;
+        }
+        .log-content {
+            color: #212529;
+        }
+        .logs-container {
+            max-height: 400px;
+            overflow-y: auto;
+            background-color: #f8f9fc;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            border: 1px solid #e3e6f0;
+        }
+        .logs-header {
+            background-color: #4e73df;
+            color: white;
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem 0.5rem 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logs-card {
+            border-radius: 0.5rem;
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.1);
+            margin-bottom: 1rem;
+        }
+        .log-level-badge {
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            margin-left: 0.5rem;
+        }
+        .log-level-error {
+            background-color: var(--danger-color);
+            color: white;
+        }
+        .log-level-warning {
+            background-color: var(--warning-color);
+            color: black;
+        }
+        .log-level-info {
+            background-color: var(--info-color);
+            color: white;
+        }
+        .log-level-debug {
+            background-color: #6c757d;
+            color: white;
+        }
+        .search-container {
+            max-width: 300px;
+            position: relative;
+        }
+        #searchResults {
+            position: absolute;
+            width: 100%;
+            z-index: 1000;
+            display: none;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .search-result-item {
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .search-result-item:hover {
+            background-color: #f8f9fa;
+        }
+        .search-result-item small {
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+<div class="container-fluid">
+    <!-- Dashboard Header -->
+    <div class="dashboard-header">
+        <div class="row align-items-center">
+            <div class="col-lg-6">
+                <h1 class="h3 mb-0 text-gray-800">
+                    <i class="bi bi-bug-fill text-primary"></i> Problem Monitoring Dashboard
+                </h1>
+            </div>
+            <div class="col-lg-6 d-flex justify-content-end align-items-center gap-3">
+                <div class="search-container">
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="searchInput" placeholder="Search by UUID...">
+                        <button class="btn btn-primary" type="button" id="searchBtn">
+                            <i class="bi bi-search"></i>
+                        </button>
+                    </div>
+                    <div class="card mt-1 shadow-sm" id="searchResults">
+                        <div class="card-body p-0" id="searchResultsList"></div>
+                    </div>
+                </div>
+                <div class="input-group" style="max-width: 200px;">
+                    <span class="input-group-text">Show</span>
+                    <select class="form-select" id="recentProblemsLimit">
+                        <option value="10">10</option>
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="250">250</option>
+                        <option value="500">500</option>
+                        <option value="1000" selected>1000</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics Cards -->
+    <div class="row mb-4">
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card stat-card primary h-100">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">
+                                Total Problems
+                            </div>
+                            <div class="h5 mb-0 font-weight-bold text-gray-800" id="totalProblems">0</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="bi bi-bug-fill fa-2x text-gray-300"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card stat-card success h-100">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-success text-uppercase mb-1">
+                                Unique Conditionals
+                            </div>
+                            <div class="h5 mb-0 font-weight-bold text-gray-800" id="uniqueConditionals">0</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="bi bi-tags-fill fa-2x text-gray-300"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card stat-card info h-100">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-info text-uppercase mb-1">
+                                Total Comments
+                            </div>
+                            <div class="h5 mb-0 font-weight-bold text-gray-800" id="totalComments">0</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="bi bi-chat-left-text-fill fa-2x text-gray-300"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card stat-card warning h-100">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-warning text-uppercase mb-1">
+                                Active Services
+                            </div>
+                            <div class="h5 mb-0 font-weight-bold text-gray-800" id="activeServices">0</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="bi bi-server fa-2x text-gray-300"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="row">
+        <!-- Left Column -->
+        <div class="col-lg-8">
+            <div class="card shadow mb-4">
+                <div class="card-header py-3 d-flex justify-content-between align-items-center">
+                    <h6 class="m-0 font-weight-bold text-primary" id="recentProblemsTitle">Recent Problems</h6>
+                    <span class="badge bg-primary" id="recentProblemsCount"></span>
+                </div>
+                <div class="card-body">
+                    <div id="recentProblemsList"></div>
+                </div>
+            </div>
+
+            <div class="card shadow mb-4">
+                <div class="card-header py-3">
+                    <h6 class="m-0 font-weight-bold text-primary">Service States Overview</h6>
+                </div>
+                <div class="card-body">
+                    <div id="serviceStatesList"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column -->
+        <div class="col-lg-4">
+            <div class="card shadow mb-4">
+                <div class="card-header py-3">
+                    <h6 class="m-0 font-weight-bold text-primary">Top Conditionals</h6>
+                </div>
+                <div class="card-body">
+                    <div id="topConditionalsList"></div>
+                </div>
+            </div>
+
+            <div class="card shadow mb-4">
+                <div class="card-header py-3">
+                    <h6 class="m-0 font-weight-bold text-primary">Conditional Distribution</h6>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="conditionalChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Problem Details Modal -->
+<div class="modal fade" id="problemDetailsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="problemModalTitle">Problem Details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <h6>Problem Description:</h6>
+                    <p id="modalProblemDescription" class="fw-bold"></p>
+                    <div class="d-flex gap-2">
+                        <span class="badge bg-primary" id="modalServiceName"></span>
+                        <span class="badge badge-conditional" id="modalConditional"></span>
+                        <span class="text-muted small" id="modalTimestamp"></span>
+                    </div>
+                </div>
+                <hr>
+                <div id="logsSection" class="mb-4 d-none">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6>Service Logs</h6>
+                        <button id="closeLogsBtn" class="btn btn-sm btn-outline-secondary">
+                            <i class="bi bi-x"></i> Hide Logs
+                        </button>
+                    </div>
+                    <div class="logs-card">
+                        <div class="logs-header">
+                            <span><i class="bi bi-journal-text"></i> Logs around problem time</span>
+                            <div class="d-flex align-items-center">
+                                <span class="badge bg-light text-dark me-2" id="logCountBadge">0 logs</span>
+                                <div class="btn-group btn-group-sm">
+                                    <button class="btn btn-light" id="filterAllLogs">All</button>
+                                    <button class="btn btn-light" id="filterErrorLogs">Errors</button>
+                                    <button class="btn btn-light" id="filterWarningLogs">Warnings</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="logs-container" id="logsContainer">
+                            <div class="text-center py-3 text-muted">
+                                <i class="bi bi-hourglass-split"></i> Loading logs...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <h6>Comments:</h6>
+                    <div id="modalCommentsList"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-info" id="getLogsBtn">
+                    <i class="bi bi-journal-text"></i> Get Recent Logs
+                </button>
+                <button type="button" class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addCommentModal">
+                    <i class="bi bi-plus-circle"></i> Add Comment
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Comment Modal -->
+<div class="modal fade" id="addCommentModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Add Comment</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addCommentForm">
+                    <input type="hidden" id="problemKey">
+                    <div class="mb-3">
+                        <label class="form-label">Comment</label>
+                        <textarea class="form-control" id="commentText" rows="3" required></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" form="addCommentForm" class="btn btn-success">Submit</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Refresh Button -->
+<button id="refreshBtn" class="btn btn-primary refresh-btn" title="Refresh Dashboard">
+    <i class="bi bi-arrow-clockwise fs-5"></i>
+</button>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    const API_BASE = '/api/problems';
+    let conditionalChart;
+    let currentProblemUuid = '';
+    let currentServiceName = '';
+    let currentProblemTimestamp = 0;
+    let allLogs = [];
+    let searchTimeout = null;
+    let currentView = 'recent'; // 'recent' or 'conditional'
+
+    document.addEventListener('DOMContentLoaded', () => {
+        loadDashboardData();
+
+        // Set up event listeners
+        document.getElementById('refreshBtn').addEventListener('click', loadDashboardData);
+        document.getElementById('recentProblemsLimit').addEventListener('change', loadRecentProblems);
+        document.getElementById('searchBtn').addEventListener('click', handleSearch);
+        document.getElementById('searchInput').addEventListener('input', handleSearchInput);
+        document.getElementById('searchInput').addEventListener('focus', () => {
+            const results = document.getElementById('searchResults');
+            if (results.innerHTML.trim() !== '') {
+                results.style.display = 'block';
+            }
+        });
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.search-container')) {
+                document.getElementById('searchResults').style.display = 'none';
+            }
+        });
+
+        // Logs related event listeners
+        document.getElementById('getLogsBtn').addEventListener('click', fetchAndDisplayLogs);
+        document.getElementById('closeLogsBtn').addEventListener('click', hideLogsSection);
+        document.getElementById('filterAllLogs').addEventListener('click', () => filterLogs('all'));
+        document.getElementById('filterErrorLogs').addEventListener('click', () => filterLogs('error'));
+        document.getElementById('filterWarningLogs').addEventListener('click', () => filterLogs('warning'));
+    });
+
+    function loadDashboardData() {
+        loadDashboardStats();
+        loadConditionalChart();
+        loadRecentProblems();
+        loadTopConditionals();
+        loadServiceStates();
+    }
+
+    async function fetchData(url, method = 'GET', body = null) {
+        const options = {
+            method,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        };
+
+        if (body) {
+            options.body = JSON.stringify(body);
+        }
+
+        try {
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.message || `HTTP error! status: ${response.status}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error('Fetch error:', error);
+            showAlert('Operation failed: ' + error.message, 'danger');
+            throw error;
+        }
+    }
+
+    async function loadDashboardStats() {
+        try {
+            const [keys, conditionalStats, totalComments, serviceStats] = await Promise.all([
+                fetchData(`${API_BASE}/keys`),
+                fetchData(`${API_BASE}/conditional-stats`),
+                fetchData(`${API_BASE}/total-comments`),
+                fetchData(`${API_BASE}/service-conditional-stats`)
+            ]);
+
+            document.getElementById('totalProblems').textContent = keys.length;
+            document.getElementById('uniqueConditionals').textContent = Object.keys(conditionalStats).length;
+            document.getElementById('totalComments').textContent = totalComments;
+
+            const activeServices = new Set(
+                Object.keys(serviceStats).map(key => key.split(':')[0])
+            ).size;
+            document.getElementById('activeServices').textContent = activeServices;
+        } catch (error) {
+            console.error('Error loading dashboard stats:', error);
+        }
+    }
+
+    async function loadConditionalChart() {
+        try {
+            const stats = await fetchData(`${API_BASE}/conditional-stats`);
+            const sortedEntries = Object.entries(stats)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 8);
+
+            const ctx = document.getElementById('conditionalChart').getContext('2d');
+
+            if (conditionalChart) {
+                conditionalChart.destroy();
+            }
+
+            conditionalChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: sortedEntries.map(([key]) => key),
+                    datasets: [{
+                        label: 'Problem Count',
+                        data: sortedEntries.map(([_, value]) => value),
+                        backgroundColor: 'rgba(78, 115, 223, 0.5)',
+                        borderColor: 'rgba(78, 115, 223, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { beginAtZero: true, ticks: { precision: 0 } }
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('Error loading conditional chart:', error);
+        }
+    }
+
+    async function loadRecentProblems() {
+        try {
+            currentView = 'recent';
+            document.getElementById('recentProblemsTitle').textContent = 'Recent Problems';
+            const limit = document.getElementById('recentProblemsLimit').value;
+            const problems = await fetchData(`${API_BASE}/recent?limit=${limit}`);
+            displayRecentProblems(problems);
+            document.getElementById('recentProblemsCount').textContent = problems.length;
+        } catch (error) {
+            console.error('Error loading recent problems:', error);
+        }
+    }
+
+    function displayRecentProblems(problems) {
+        const container = document.getElementById('recentProblemsList');
+        container.innerHTML = '';
+
+        if (problems.length === 0) {
+            container.innerHTML = '<div class="alert alert-info">No problems found</div>';
+            return;
+        }
+
+        problems.forEach(problem => {
+            const card = document.createElement('div');
+            card.className = 'card problem-card mb-3 cursor-pointer';
+            card.addEventListener('click', () => showProblemDetails(problem.id));
+
+            card.innerHTML = `
+                <div class="card-body">
+                    <div class="d-flex justify-content-between">
+                        <h5 class="card-title">${problem.description.substring(0, 80)}${problem.description.length > 80 ? '...' : ''}</h5>
+                        <span class="badge bg-primary">${problem.serviceName}</span>
+                    </div>
+                    <div class="mt-2">
+                        <span class="badge badge-conditional">${problem.conditional}</span>
+                        <span class="ms-2"><i class="bi bi-chat-left-text"></i> ${problem.commentCount} comments</span>
+                    </div>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+    }
+
+    async function loadTopConditionals() {
+        try {
+            const stats = await fetchData(`${API_BASE}/conditional-stats`);
+            const sortedEntries = Object.entries(stats)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5);
+
+            displayTopConditionals(sortedEntries);
+        } catch (error) {
+            console.error('Error loading top conditionals:', error);
+        }
+    }
+
+    function displayTopConditionals(conditionals) {
+        const container = document.getElementById('topConditionalsList');
+        container.innerHTML = '';
+
+        conditionals.forEach(([conditional, count]) => {
+            const item = document.createElement('div');
+            item.className = 'd-flex justify-content-between align-items-center mb-2 p-2 bg-light rounded cursor-pointer';
+            item.addEventListener('click', () => {
+                loadProblemsByConditional(conditional);
+            });
+            item.innerHTML = `
+                <span class="badge badge-conditional">${conditional}</span>
+                <span class="badge bg-primary rounded-pill">${count}</span>
+            `;
+            container.appendChild(item);
+        });
+    }
+
+    async function loadServiceStates() {
+        try {
+            const states = await fetchData(`${API_BASE}/get-states-per-service`);
+            displayServiceStates(states);
+        } catch (error) {
+            console.error('Error loading service states:', error);
+        }
+    }
+
+    function displayServiceStates(states) {
+        const container = document.getElementById('serviceStatesList');
+        container.innerHTML = '';
+
+        if (!states || states.length === 0) {
+            container.innerHTML = '<div class="alert alert-info">No service state information available</div>';
+            return;
+        }
+
+        states.forEach(service => {
+            const card = document.createElement('div');
+            card.className = `service-state-card p-3 ${getStateClass(service.currentState)}`;
+
+            card.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h5 class="mb-0">
+                        <i class="bi bi-server me-2"></i>${service.serviceName}
+                    </h5>
+                    <span class="badge ${getStateBadgeClass(service.currentState)}">${service.currentState}</span>
+                </div>
+                <div class="d-flex justify-content-between">
+                    <small>Predicted state: <span class="badge ${getStateBadgeClass(service.predictedState)}">${service.predictedState}</span></small>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+    }
+
+    function getStateClass(state) {
+        if (!state) return 'state-unknown';
+        state = state.toLowerCase();
+        if (state.includes('healthy')) return 'state-healthy';
+        if (state.includes('warning')) return 'state-warning';
+        if (state.includes('critical')) return 'state-critical';
+        if (state.includes('error')) return 'state-error';
+        return 'state-unknown';
+    }
+
+    function getStateBadgeClass(state) {
+        if (!state) return 'bg-secondary';
+        state = state.toLowerCase();
+        if (state.includes('healthy')) return 'bg-success';
+        if (state.includes('warning')) return 'bg-warning text-dark';
+        if (state.includes('critical')) return 'bg-danger';
+        if (state.includes('error')) return 'bg-secondary';
+        return 'bg-secondary';
+    }
+
+    async function showProblemDetails(uuid) {
+        try {
+            // Extract just the UUID part if the full key is provided
+            const uuidParts = uuid.split(':');
+            const uuidToFetch = uuidParts.length > 1 ? uuidParts[1] : uuid;
+
+            currentProblemUuid = uuidToFetch;
+            document.getElementById('problemKey').value = uuidToFetch;
+            hideLogsSection(); // Hide logs section when showing new problem
+
+            const metadata = await fetchData(`${API_BASE}/${uuidToFetch}/metadata`);
+
+            const [problem, comments] = await Promise.all([
+                fetchData(`${API_BASE}/${uuidToFetch}`),
+                fetchData(`${API_BASE}/${uuidToFetch}/comments`)
+            ]);
+
+            currentServiceName = metadata.serviceName || 'Unknown';
+            currentProblemTimestamp = parseInt(metadata.timestamp) || Date.now();
+
+            document.getElementById('modalServiceName').textContent = currentServiceName;
+            document.getElementById('modalConditional').textContent = metadata.conditional || 'Unknown';
+            document.getElementById('modalProblemDescription').textContent = problem.description;
+            document.getElementById('problemModalTitle').textContent = `Problem Details (ID: ${uuidToFetch})`;
+
+            const timestamp = new Date(currentProblemTimestamp);
+            document.getElementById('modalTimestamp').textContent = timestamp.toLocaleString();
+
+            const commentsList = document.getElementById('modalCommentsList');
+            commentsList.innerHTML = '';
+
+            if (comments.length === 0) {
+                commentsList.innerHTML = '<div class="alert alert-info">No comments yet</div>';
+            } else {
+                comments.forEach(comment => {
+                    const commentDiv = document.createElement('div');
+                    commentDiv.className = 'comment-box';
+                    commentDiv.innerHTML = `<p class="mb-0">${comment}</p>`;
+                    commentsList.appendChild(commentDiv);
+                });
+            }
+
+            const modal = new bootstrap.Modal(document.getElementById('problemDetailsModal'));
+            modal.show();
+        } catch (error) {
+            console.error('Error showing problem details:', error);
+            showAlert('Failed to load problem details: ' + error.message, 'danger');
+        }
+    }
+
+    async function fetchAndDisplayLogs() {
+        try {
+            const logsSection = document.getElementById('logsSection');
+            logsSection.classList.remove('d-none');
+
+            const logsContainer = document.getElementById('logsContainer');
+            logsContainer.innerHTML = '<div class="text-center py-3 text-muted"><i class="bi bi-hourglass-split"></i> Loading logs...</div>';
+
+            // Scroll to logs section
+            logsSection.scrollIntoView({ behavior: 'smooth' });
+
+            // Fetch logs for the service around the problem time (±2 minutes)
+            const logs = await fetchData(
+                `${API_BASE}/get-recent-logs-for-problem/${currentServiceName}/${currentProblemTimestamp}`
+            );
+
+            allLogs = logs || [];
+            displayLogs(allLogs);
+
+            // Update log count badge
+            document.getElementById('logCountBadge').textContent = `${allLogs.length} logs`;
+
+        } catch (error) {
+            console.error('Error fetching logs:', error);
+            const logsContainer = document.getElementById('logsContainer');
+            logsContainer.innerHTML = `<div class="alert alert-danger">Failed to load logs: ${error.message}</div>`;
+        }
+    }
+
+    function displayLogs(logs) {
+        const logsContainer = document.getElementById('logsContainer');
+        logsContainer.innerHTML = '';
+
+        if (logs.length === 0) {
+            logsContainer.innerHTML = '<div class="alert alert-info">No logs found for this time period</div>';
+            return;
+        }
+
+        logs.forEach(log => {
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+
+            // Detect log level for styling
+            const logLevel = detectLogLevel(log);
+            if (logLevel) {
+                logEntry.classList.add(`log-entry-${logLevel}`);
+            }
+
+            // Parse timestamp if present (assuming format like "2023-01-01T12:00:00.123Z message")
+            let timestamp = '';
+            let content = log;
+
+            // Try to parse ISO timestamp at start of log
+            const timestampEnd = log.indexOf(' ');
+            if (timestampEnd > 0) {
+                const timestampStr = log.substring(0, timestampEnd);
+                try {
+                    const date = new Date(timestampStr);
+                    if (!isNaN(date.getTime())) {
+                        timestamp = timestampStr;
+                        content = log.substring(timestampEnd + 1);
+                    }
+                } catch (e) {
+                    // Not a valid timestamp, use whole log as content
+                }
+            }
+
+            // Add level badge if we detected a level
+            let levelBadge = '';
+            if (logLevel) {
+                levelBadge = `<span class="log-level-badge log-level-${logLevel}">${logLevel.toUpperCase()}</span>`;
+            }
+
+            logEntry.innerHTML = `
+                ${timestamp ? `<span class="log-timestamp">${timestamp}</span>` : ''}
+                ${levelBadge}
+                <span class="log-content">${content}</span>
+            `;
+
+            logsContainer.appendChild(logEntry);
+        });
+    }
+
+    function detectLogLevel(log) {
+        if (!log) return null;
+
+        const lowerLog = log.toLowerCase();
+        if (lowerLog.includes('error') || lowerLog.includes('exception') || lowerLog.includes('failed')) {
+            return 'error';
+        }
+        if (lowerLog.includes('warn')) {
+            return 'warning';
+        }
+        if (lowerLog.includes('info')) {
+            return 'info';
+        }
+        if (lowerLog.includes('debug')) {
+            return 'debug';
+        }
+        return null;
+    }
+
+    function filterLogs(level) {
+        if (level === 'all') {
+            displayLogs(allLogs);
+            return;
+        }
+
+        const filteredLogs = allLogs.filter(log => {
+            const logLevel = detectLogLevel(log);
+            return logLevel === level;
+        });
+
+        displayLogs(filteredLogs);
+    }
+
+    function hideLogsSection() {
+        document.getElementById('logsSection').classList.add('d-none');
+    }
+
+    document.getElementById('addCommentForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const uuid = currentProblemUuid;
+        const comment = document.getElementById('commentText').value;
+
+        if (!comment.trim()) {
+            showAlert('Comment cannot be empty', 'warning');
+            return;
+        }
+
+        try {
+            await fetchData(`${API_BASE}/${uuid}/comments`, 'POST', { comment });
+
+            showAlert('Comment added successfully!', 'success');
+            document.getElementById('addCommentForm').reset();
+            bootstrap.Modal.getInstance(document.getElementById('addCommentModal')).hide();
+
+            showProblemDetails(uuid);
+        } catch (error) {
+            console.error('Error adding comment:', error);
+            showAlert('Failed to add comment: ' + error.message, 'danger');
+        }
+    });
+
+    function showAlert(message, type) {
+        const alert = document.createElement('div');
+        alert.className = `alert alert-${type} alert-dismissible fade show position-fixed top-0 end-0 m-3`;
+        alert.role = 'alert';
+        alert.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        `;
+        document.body.appendChild(alert);
+        setTimeout(() => alert.remove(), 3000);
+    }
+
+    // Load problems by conditional
+    async function loadProblemsByConditional(conditional) {
+        try {
+            currentView = 'conditional';
+            document.getElementById('recentProblemsTitle').textContent = `Problems with conditional: ${conditional}`;
+            const problems = await fetchData(`${API_BASE}/by-conditional/${conditional}?limit=1000`);
+            displayProblemsByConditional(problems, conditional);
+        } catch (error) {
+            console.error('Error loading problems by conditional:', error);
+            showAlert('Failed to load problems: ' + error.message, 'danger');
+        }
+    }
+
+    function displayProblemsByConditional(problems, conditional) {
+        const container = document.getElementById('recentProblemsList');
+        container.innerHTML = '';
+
+        if (problems.length === 0) {
+            container.innerHTML = `<div class="alert alert-info">No problems found for conditional: ${conditional}</div>`;
+            return;
+        }
+
+        const header = document.createElement('div');
+        header.className = 'd-flex justify-content-between align-items-center mb-3';
+        header.innerHTML = `
+            <h5 class="mb-0">Problems with conditional: <span class="badge badge-conditional">${conditional}</span></h5>
+            <button class="btn btn-sm btn-outline-secondary" onclick="loadRecentProblems()">
+                <i class="bi bi-arrow-left"></i> Back to all problems
+            </button>
+        `;
+        container.appendChild(header);
+
+        problems.forEach(problem => {
+            const card = document.createElement('div');
+            card.className = 'card problem-card mb-3 cursor-pointer';
+            card.addEventListener('click', () => showProblemDetails(problem));
+
+            card.innerHTML = `
+                <div class="card-body">
+                    <div class="d-flex justify-content-between">
+                        <h5 class="card-title">${problem.substring(0, 80)}${problem.length > 80 ? '...' : ''}</h5>
+                    </div>
+                    <div class="mt-2">
+                        <span class="badge badge-conditional">${conditional}</span>
+                    </div>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+
+        // Update the recent problems count
+        document.getElementById('recentProblemsCount').textContent = problems.length;
+    }
+
+    async function handleSearchInput() {
+        clearTimeout(searchTimeout);
+        const searchTerm = document.getElementById('searchInput').value.trim();
+
+        if (searchTerm.length < 3) {
+            document.getElementById('searchResults').style.display = 'none';
+            return;
+        }
+
+        searchTimeout = setTimeout(async () => {
+            try {
+                const problems = await fetchData(`${API_BASE}/keys`);
+                const filtered = problems.filter(key =>
+                    key.toLowerCase().includes(searchTerm.toLowerCase())
+                ).slice(0, 10);
+
+                displaySearchResults(filtered);
+            } catch (error) {
+                console.error('Search error:', error);
+            }
+        }, 300);
+    }
+
+    function displaySearchResults(results) {
+        const container = document.getElementById('searchResultsList');
+        container.innerHTML = '';
+
+        if (results.length === 0) {
+            container.innerHTML = '<div class="p-2 text-muted">No matching problems found</div>';
+        } else {
+            results.forEach(fullKey => {
+                const uuidParts = fullKey.split(':');
+                const uuid = uuidParts.length > 1 ? uuidParts[1] : fullKey;
+
+                const item = document.createElement('div');
+                item.className = 'search-result-item';
+                item.innerHTML = `
+                    <div>${uuid.substring(0, 8)}...</div>
+                    <small>${fullKey}</small>
+                `;
+                item.addEventListener('click', () => {
+                    document.getElementById('searchInput').value = '';
+                    document.getElementById('searchResults').style.display = 'none';
+                    showProblemDetails(fullKey);
+                });
+                container.appendChild(item);
+            });
+        }
+
+        document.getElementById('searchResults').style.display = 'block';
+    }
+
+    async function handleSearch() {
+        const searchTerm = document.getElementById('searchInput').value.trim();
+        if (searchTerm.length === 0) return;
+
+        try {
+            await showProblemDetails(searchTerm);
+            document.getElementById('searchInput').value = '';
+            document.getElementById('searchResults').style.display = 'none';
+        } catch (error) {
+            showAlert('Problem not found', 'danger');
+        }
+    }
+</script>
+</body>
+</html>
