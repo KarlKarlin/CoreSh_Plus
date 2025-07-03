@@ -2,10 +2,7 @@ package org.CorePlane.services;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.model.Frame;
-import com.github.dockerjava.api.model.Service;
-import com.github.dockerjava.api.model.ServiceSpec;
-import com.github.dockerjava.api.model.TaskSpec;
+import com.github.dockerjava.api.model.*;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
@@ -119,11 +116,7 @@ public class DockerSwarmService {
                 .exec()
                 .get(0);
 
-        long updatedAtMillis = service.getUpdatedAt().getSeconds() * 1000;
-        OffsetDateTime timestamp = OffsetDateTime.ofInstant(
-                Instant.ofEpochMilli(updatedAtMillis),
-                ZoneId.systemDefault()
-        );
+        OffsetDateTime timestamp = OffsetDateTime.now();
 
         return new ServiceVersion(
                 service.getSpec().getTaskTemplate().getContainerSpec().getImage(),
@@ -259,6 +252,56 @@ public class DockerSwarmService {
         return Arrays.stream(words)
                 .limit(wordCount)
                 .collect(Collectors.joining(" "));
+    }
+
+    public boolean restartAllPodsForService(String serviceName) {
+        try {
+            List<String> containerIds = getContainerIdsForService(serviceName);
+
+            if (containerIds.isEmpty()) {
+                System.out.println("No containers found for service: " + serviceName);
+                return false;
+            }
+
+            boolean allRestarted = true;
+
+            for (String containerId : containerIds) {
+                try {
+                    dockerClient.stopContainerCmd(containerId)
+                            .withTimeout(10)
+                            .exec();
+                    System.out.println("Stopped container: " + containerId);
+
+                    dockerClient.removeContainerCmd(containerId)
+                            .withForce(true)
+                            .exec();
+                    System.out.println("Removed container: " + containerId);
+
+                } catch (Exception e) {
+                    System.err.println("Failed to restart container " + containerId + ": " + e.getMessage());
+                    allRestarted = false;
+                }
+            }
+
+            return allRestarted;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to restart pods for service: " + serviceName, e);
+        }
+    }
+
+    private List<String> getContainerIdsForService(String serviceName) {
+        try {
+            List<Container> containers = dockerClient.listContainersCmd()
+                    .withShowAll(true)
+                    .withLabelFilter(Collections.singleton("service=" + serviceName))
+                    .exec();
+
+            return containers.stream()
+                    .map(Container::getId)
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to get container IDs for service: " + serviceName, e);
+        }
     }
 
     public boolean restartCrashedContainers(String serviceName) {

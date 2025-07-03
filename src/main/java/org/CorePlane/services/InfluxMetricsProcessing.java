@@ -103,7 +103,7 @@ public class InfluxMetricsProcessing {
                         *Current Replicas:* %d
                         """,
                         analysis.serviceName(),
-                        analysis.field(),
+                        analysis.measurement,
                         analysis.currentPeak(),
                         analysis.previousPeak(),
                         analysis.percentageIncrease(),
@@ -122,7 +122,7 @@ public class InfluxMetricsProcessing {
         if (analysis.currentLoadPerReplica() > warningThreshold && analysis.currentLoadPerReplica() < analysis.threshold()) {
             String message = String.format("""
                     **Service:** %s
-                    **Trigger Metric:** %s.%s
+                    **Trigger Metric:** %s
                     **Current Load/Replica:** %.2f
                     **Warning Threshold:** %.2f
                     **Critical Threshold:** %.2f
@@ -130,7 +130,6 @@ public class InfluxMetricsProcessing {
                     """,
                     analysis.serviceName(),
                     analysis.measurement(),
-                    analysis.field(),
                     analysis.currentLoadPerReplica(),
                     warningThreshold,
                     analysis.threshold());
@@ -189,7 +188,7 @@ public class InfluxMetricsProcessing {
             return;
         }
 
-        if (redisService.isCooldown(analysis.serviceName())) return;
+        if (redisService.exists("scalingCooldown:" + analysis.serviceName)) return;
 
         int maxReplicas = configProcessing.getMaxReplicasForService(analysis.serviceName());
 
@@ -210,7 +209,7 @@ public class InfluxMetricsProcessing {
                 newReplicas,
                 analysis.currentLoadPerReplica(),
                 analysis.threshold(),
-                analysis.field());
+                analysis.measurement);
 
         redisService.commentProblem(analysis.serviceName(), message, "warn");
 
@@ -232,7 +231,7 @@ public class InfluxMetricsProcessing {
 
         redisService.commentProblem(analysis.serviceName(), message1, "warn");
 
-        redisService.setCooldown(analysis.serviceName, analysis.measurement + "." + analysis.field);
+        redisService.setWithExpiry("scalingCooldown:" + analysis.serviceName, "influxProcessingMetricCooldown", configProcessing.getMetricWindowMinutes(analysis.measurement + "." + analysis.field));
     }
 
     public double getMaxMetricValueForLastHour(String measurement, String field, String serviceName) {

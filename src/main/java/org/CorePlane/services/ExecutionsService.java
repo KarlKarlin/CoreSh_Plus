@@ -21,6 +21,7 @@ public class ExecutionsService {
     private final JaegerTracesProcessing jaegerTracesProcessing;
     private final DockerSwarmService dockerSwarmService;
     private final MemoryAnalyzer memoryAnalyzer;
+    private final MetricsProcessing processing;
 
     public ExecutionsService(ConfigProcessing configProcessing,
                              WriteStateService writeStateService,
@@ -28,7 +29,7 @@ public class ExecutionsService {
                              InfluxMetricsProcessing metricsProcessing,
                              JaegerTracesProcessing jaegerTracesProcessing,
                              DockerSwarmService dockerSwarmService,
-                             MemoryAnalyzer memoryAnalyzer) {
+                             MemoryAnalyzer memoryAnalyzer, MetricsProcessing processing) {
         this.configProcessing = configProcessing;
         this.writeStateService = writeStateService;
         this.redisService = redisService;
@@ -36,6 +37,7 @@ public class ExecutionsService {
         this.jaegerTracesProcessing = jaegerTracesProcessing;
         this.dockerSwarmService = dockerSwarmService;
         this.memoryAnalyzer = memoryAnalyzer;
+        this.processing = processing;
     }
 
     @Scheduled(fixedDelayString = "${schedule.checks.interval}")
@@ -215,9 +217,9 @@ public class ExecutionsService {
 
         for (String service : services) {
 
-            if (redisService.isCooldownForMetric(service, "memory.used_percent")) return;
+            if (redisService.isCooldownN(service, "memory.used_percent", "frozen2")) return;
 
-            MemoryAnalyzer.MemoryAnalysisResult result = memoryAnalyzer.analyzeMemory(service, windowMinutes);
+            MemoryAnalyzer.MemoryAnalysisResult result = memoryAnalyzer.analyzeMemoryPerPod(service, windowMinutes);
 
             if (result.possibleLeak || result.possibleBloat) {
 
@@ -248,10 +250,10 @@ public class ExecutionsService {
 
                 redisService.commentProblem(service, message, "critical");
 
-                jaegerTracesProcessing.fixErrorRate(service);
-            }
+                dockerSwarmService.restartAllPodsForService(service);
 
-            redisService.setCooldownForMetric(service, "memory.used_percent");
+                redisService.setCooldownN(service, "memory.used_percent", "frozen2");
+            }
         }
     }
 
@@ -307,6 +309,33 @@ public class ExecutionsService {
         }
     }
 
+    @Scheduled(fixedDelayString = "300000")
+    public void executeCleanupPerHost() {
+
+        try {
+            List<String> services = configProcessing.getDockerServices();
+            List<String> metricsToMonitor = configProcessing.getMonitoredMetrics();
+
+            if (services.isEmpty() || metricsToMonitor.isEmpty()) {
+                logger.warn("No services or metrics configured for monitoring");
+                return;
+            }
+
+            for (String service : services) {
+                for (String metric : metricsToMonitor) {
+                    try {
+                        cleanupEmptyHosts(service, metric);
+                    } catch (Exception e) {
+                        logger.error("Failed to process metric {} for service {}", metric, service, e);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error in host cleanup execution", e);
+        }
+
+    }
+
     private String generateDiagnosisMessage(MemoryAnalyzer.MemoryAnalysisResult result) {
         if (result.possibleLeak && result.possibleBloat) {
             return "Critical: Both memory leak and bloat detected. This indicates both sustained memory growth and erratic allocation patterns.";
@@ -324,6 +353,13 @@ public class ExecutionsService {
         int windowMinutes = configProcessing.getMetricWindowMinutes(metric);
 
         metricsProcessing.handleMetric(measurement, field, service, windowMinutes);
+    }
+
+    private void cleanupEmptyHosts(String service, String metric) {
+        String[] parts = metric.split("\\.");
+        String measurement = parts[0];
+
+        processing.cleanupInactiveHosts(measurement, service, 30);
     }
 
     private void sendScalingNotification(String service, int currentReplicas, int newReplicas,

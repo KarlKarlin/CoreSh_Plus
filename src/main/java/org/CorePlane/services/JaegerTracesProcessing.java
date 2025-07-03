@@ -2,6 +2,7 @@ package org.CorePlane.services;
 
 import org.CorePlane.configurations.ConfigProcessing;
 import org.springframework.stereotype.Service;
+import java.io.IOException;
 import java.util.*;
 
 @Service
@@ -21,10 +22,14 @@ public class JaegerTracesProcessing {
         this.redisService = redisService;
     }
 
-    public void fixErrorRate(String serviceName) {
+    public void fixErrorRate(String serviceName) throws IOException {
         int errorsCount = jaegerQueryService.getErrorTracesCount(serviceName, configProcessing.getErrorWindowHours());
+        int allTracesCount = jaegerQueryService.getAllTracesForService(serviceName, configProcessing.getErrorWindowHours()).size();
 
-        if(errorsCount < configProcessing.getMaxErrorRate()) {
+        boolean isHighErrorRate = allTracesCount > 0 &&
+                (errorsCount * 100.0 / allTracesCount) > configProcessing.getMaxErrorRate();
+
+        if(!isHighErrorRate) {
             return;
         }
 
@@ -40,7 +45,7 @@ public class JaegerTracesProcessing {
         redisService.setWithExpiry(
                 REDIS_TRACE_PREFIX + "errorFix:" + lastErrorDetails.traceId(),
                 "analyzed",
-                60
+                configProcessing.getErrorWindowHours() * 60L
         );
 
         String message = String.format("""
@@ -87,9 +92,13 @@ public class JaegerTracesProcessing {
             if (!redisService.exists(REDIS_TRACE_PREFIX + traceId)) {
                 TraceAnalysisResult analysis = analyzeCompleteTrace(traceId, allServices);
                 if (analysis.hasProblems()) {
-                    notifyAboutProblematicTrace(analysis, maxLatencyThresholdMs);
+                    try {
+                        notifyAboutProblematicTrace(analysis, maxLatencyThresholdMs);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
                 }
-                redisService.setWithExpiry(REDIS_TRACE_PREFIX + traceId, "analyzed", 60);
+                redisService.setWithExpiry(REDIS_TRACE_PREFIX + traceId, "analyzed", configProcessing.getErrorWindowHours() * 60L);
             }
         });
     }
@@ -102,7 +111,7 @@ public class JaegerTracesProcessing {
         return result;
     }
 
-    private void notifyAboutProblematicTrace(TraceAnalysisResult analysis, double maxLatencyThresholdMs) {
+    private void notifyAboutProblematicTrace(TraceAnalysisResult analysis, double maxLatencyThresholdMs) throws IOException {
 
         String message = String.format("""
             *Trace ID:* %s

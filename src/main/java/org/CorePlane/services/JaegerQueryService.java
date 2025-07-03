@@ -50,11 +50,17 @@ public class JaegerQueryService {
     }
 
     public List<String> fetchErrorTraceIdsForService(String serviceName, long lookbackHours, int limit) throws IOException {
+
+        long lookbackMicros = lookbackHours * 3_600_000_000L;
+        long endTimeMicros = System.currentTimeMillis() * 1000;
+        long startTimeMicros = endTimeMicros - lookbackMicros;
+
         URI uri = UriComponentsBuilder.fromHttpUrl(jaegerQueryUrl)
                 .path("/api/traces")
                 .queryParam("service", serviceName)
                 .queryParam("limit", limit)
-                .queryParam("lookback", lookbackHours + "h")
+                .queryParam("start", startTimeMicros)
+                .queryParam("end", endTimeMicros)
                 .queryParam("tags", "{\"error\":\"true\"}")
                 .build()
                 .toUri();
@@ -136,6 +142,35 @@ public class JaegerQueryService {
         return false;
     }
 
+    public List<String> getAllTracesForService(String serviceName, long lookbackHours) throws IOException {
+        long lookbackMicros = lookbackHours * 3_600_000_000L;
+        long endTimeMicros = System.currentTimeMillis() * 1000;
+        long startTimeMicros = endTimeMicros - lookbackMicros;
+
+        URI uri = UriComponentsBuilder.fromHttpUrl(jaegerQueryUrl)
+                .path("/api/traces")
+                .queryParam("service", serviceName)
+                .queryParam("start", startTimeMicros)
+                .queryParam("end", endTimeMicros)
+                .build()
+                .toUri();
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                uri,
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                String.class
+        );
+
+        JsonNode rootNode = objectMapper.readTree(response.getBody());
+        JsonNode dataNode = rootNode.path("data");
+
+        return objectMapper.convertValue(dataNode, new TypeReference<List<Map<String, Object>>>() {})
+                .stream()
+                .map(trace -> (String) trace.get("traceID"))
+                .collect(Collectors.toList());
+    }
+
     private String buildErrorDetails(String exceptionClass, String errorMessage, String httpStatus) {
         StringBuilder details = new StringBuilder();
         if (exceptionClass != null) {
@@ -184,12 +219,16 @@ public class JaegerQueryService {
     }
 
     private int getTotalTracesCount(String serviceName, double lookbackHours) throws IOException {
+        long lookbackMicros = (long)(lookbackHours * 3_600_000_000L);
+        long endTimeMicros = System.currentTimeMillis() * 1000;
+        long startTimeMicros = endTimeMicros - lookbackMicros;
 
         URI uri = UriComponentsBuilder.fromHttpUrl(jaegerQueryUrl)
                 .path("/api/traces")
                 .queryParam("service", serviceName)
                 .queryParam("limit", 1)
-                .queryParam("lookback", lookbackHours + "h")
+                .queryParam("start", startTimeMicros)
+                .queryParam("end", endTimeMicros)
                 .build()
                 .toUri();
 
@@ -210,11 +249,16 @@ public class JaegerQueryService {
     }
 
     private List<String> fetchTraceIdsForService(String serviceName, double lookbackHours, int limit) throws IOException {
+        long lookbackMicros = (long)(lookbackHours * 3_600_000_000L);
+        long endTimeMicros = System.currentTimeMillis() * 1000;
+        long startTimeMicros = endTimeMicros - lookbackMicros;
+
         URI uri = UriComponentsBuilder.fromHttpUrl(jaegerQueryUrl)
                 .path("/api/traces")
                 .queryParam("service", serviceName)
                 .queryParam("limit", limit)
-                .queryParam("lookback", lookbackHours + "h")
+                .queryParam("start", startTimeMicros)
+                .queryParam("end", endTimeMicros)
                 .build()
                 .toUri();
 
@@ -241,6 +285,10 @@ public class JaegerQueryService {
             int windowMinutes = configProcessing.getWindowMinutesForJaeger();
             int analysisPercentage = configProcessing.getAnalysisPercentage();
             double lookbackHours = windowMinutes / 60.0;
+
+            long lookbackMicros = (long)(lookbackHours * 3_600_000_000L);
+            long endTimeMicros = System.currentTimeMillis() * 1000;
+            long startTimeMicros = endTimeMicros - lookbackMicros;
 
             int totalTraces = getTotalTracesCount(mainService, lookbackHours);
             int sampledTraces = (int) Math.ceil(totalTraces * (analysisPercentage / 100.0));

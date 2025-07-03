@@ -138,7 +138,7 @@ public class ConfigProcessing {
 
     public int getErrorWindowHours() {
         Map<String, Object> data = getConfigFromYaml();
-        return (int) data.get("error_window_minutes") / 60;
+        return ((int) data.get("error_window_minutes") / 60);
     }
 
     public boolean isLogTracker() {

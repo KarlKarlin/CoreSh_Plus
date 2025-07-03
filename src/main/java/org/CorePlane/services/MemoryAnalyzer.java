@@ -2,9 +2,7 @@ package org.CorePlane.services;
 
 import org.springframework.stereotype.Service;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @Service
 public class MemoryAnalyzer {
@@ -18,12 +16,41 @@ public class MemoryAnalyzer {
         this.metricsProcessing = metricsProcessing;
     }
 
-    public MemoryAnalysisResult analyzeMemory(String serviceName, int minutes) {
-        Map<Instant, Double> data = metricsProcessing.getMetricsWithTimestampsInWindow(
+    public MemoryAnalysisResult analyzeMemoryPerPod(String serviceName, int minutes) {
+        Map<String, Map<Instant, Double>> podMetrics = metricsProcessing.getMetricsByPod(
                 "memory", "used_percent", serviceName, minutes);
 
-        if (data.size() < 3) return new MemoryAnalysisResult(false, false, 0, 0);
+        if (podMetrics.isEmpty()) {
+            return new MemoryAnalysisResult(false, false, 0, 0);
+        }
 
+        List<MemoryAnalysisResult> podResults = new ArrayList<>();
+        List<Double> allAreaRatios = new ArrayList<>();
+        List<Double> allStdDeviations = new ArrayList<>();
+
+        for (Map.Entry<String, Map<Instant, Double>> entry : podMetrics.entrySet()) {
+            if (entry.getValue().size() >= 3) {
+                MemoryAnalysisResult podResult = analyzeMemoryData(entry.getValue());
+                podResults.add(podResult);
+                allAreaRatios.add(podResult.areaRatio);
+                allStdDeviations.add(podResult.standardDeviation);
+            }
+        }
+
+        if (podResults.isEmpty()) {
+            return new MemoryAnalysisResult(false, false, 0, 0);
+        }
+
+        boolean anyLeak = podResults.stream().anyMatch(r -> r.possibleLeak);
+        boolean anyBloat = podResults.stream().anyMatch(r -> r.possibleBloat);
+
+        double maxAreaRatio = allAreaRatios.stream().max(Double::compare).orElse(0.0);
+        double maxStdDev = allStdDeviations.stream().max(Double::compare).orElse(0.0);
+
+        return new MemoryAnalysisResult(anyLeak, anyBloat, maxAreaRatio, maxStdDev);
+    }
+
+    private MemoryAnalysisResult analyzeMemoryData(Map<Instant, Double> data) {
         List<Instant> times = new ArrayList<>(data.keySet());
         List<Double> values = new ArrayList<>(data.values());
 
@@ -76,7 +103,6 @@ public class MemoryAnalyzer {
     }
 
     private double calculateStandardDeviation(List<Double> values, LinearRegression baseline, List<Instant> times) {
-
         if (values == null || times == null || values.isEmpty() || times.isEmpty() || values.size() != times.size()) {
             return 0;
         }

@@ -129,6 +129,10 @@ public class RedisService {
                 return false;
             }
 
+            String historyKey = String.format(VERSION_HISTORY_KEY, serviceName);
+
+            stringRedisTemplate.opsForList().rightPop(historyKey);
+
             dockerSwarmService.rollbackToVersion(serviceName, target.image());
 
             return true;
@@ -213,27 +217,14 @@ public class RedisService {
                 .collect(Collectors.toList());
     }
 
-    public void setCooldown(String serviceName, String metric) {
-        stringRedisTemplate.opsForValue().set("cooldown:" + serviceName, "frozen", Duration.ofMinutes(configProcessing.getMetricWindowMinutes(metric)));
+    public void setCooldownN(String serviceName, String metric, String definition) {
+        stringRedisTemplate.opsForValue().set("cooldown:" + serviceName + ":" + metric, definition, Duration.ofMinutes(configProcessing.getMetricWindowMinutes(metric)));
     }
 
-    public boolean isCooldown(String serviceName) {
-        try {
-            String cooldownStatus = stringRedisTemplate.opsForValue().get("cooldown:" + serviceName);
-            return cooldownStatus != null && cooldownStatus.equals("frozen");
-        } catch (Exception e) {
-            return true;
-        }
-    }
-
-    public void setCooldownForMetric(String serviceName, String metric) {
-        stringRedisTemplate.opsForValue().set("cooldown:" + serviceName + ":" + metric, "frozen1", Duration.ofMinutes(configProcessing.getMetricWindowMinutes(metric)));
-    }
-
-    public boolean isCooldownForMetric(String serviceName, String metric) {
+    public boolean isCooldownN(String serviceName, String metric, String definition) {
         try {
             String cooldownStatus = stringRedisTemplate.opsForValue().get("cooldown:" + serviceName + ":" + metric);
-            return cooldownStatus != null && cooldownStatus.equals("frozen1");
+            return cooldownStatus != null && cooldownStatus.equals(definition);
         } catch (Exception e) {
             return true;
         }
