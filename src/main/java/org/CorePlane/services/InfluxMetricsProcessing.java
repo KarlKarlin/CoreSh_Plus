@@ -53,7 +53,7 @@ public class InfluxMetricsProcessing {
 
         int currentReplicas = dockerSwarmService.getCurrentReplicasForService(serviceName);
 
-        double threshold = getMetricThreshold(field);
+        double threshold = getMetricThreshold(measurement + "." + field);
 
         double currentLoadPerReplica = currentReplicas > 0 ?
                 currentLoad / currentReplicas : currentLoad;

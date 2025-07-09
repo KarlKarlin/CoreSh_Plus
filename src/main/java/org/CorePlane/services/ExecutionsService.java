@@ -5,10 +5,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 public class ExecutionsService {
@@ -17,27 +19,29 @@ public class ExecutionsService {
     private final ConfigProcessing configProcessing;
     private final WriteStateService writeStateService;
     private final RedisService redisService;
-    private final InfluxMetricsProcessing metricsProcessing;
+    private final InfluxMetricsProcessing InfluxMetricsProcessing;
     private final JaegerTracesProcessing jaegerTracesProcessing;
     private final DockerSwarmService dockerSwarmService;
     private final MemoryAnalyzer memoryAnalyzer;
-    private final MetricsProcessing processing;
+    private final MetricsProcessing MetricProcessing;
+    private final AttacksAnalyzer attacksAnalyzer;
 
     public ExecutionsService(ConfigProcessing configProcessing,
                              WriteStateService writeStateService,
                              RedisService redisService,
-                             InfluxMetricsProcessing metricsProcessing,
+                             InfluxMetricsProcessing InfluxMetricsProcessing,
                              JaegerTracesProcessing jaegerTracesProcessing,
                              DockerSwarmService dockerSwarmService,
-                             MemoryAnalyzer memoryAnalyzer, MetricsProcessing processing) {
+                             MemoryAnalyzer memoryAnalyzer, MetricsProcessing MetricProcessing, AttacksAnalyzer attacksAnalyzer) {
         this.configProcessing = configProcessing;
         this.writeStateService = writeStateService;
         this.redisService = redisService;
-        this.metricsProcessing = metricsProcessing;
+        this.InfluxMetricsProcessing = InfluxMetricsProcessing;
         this.jaegerTracesProcessing = jaegerTracesProcessing;
         this.dockerSwarmService = dockerSwarmService;
         this.memoryAnalyzer = memoryAnalyzer;
-        this.processing = processing;
+        this.MetricProcessing = MetricProcessing;
+        this.attacksAnalyzer = attacksAnalyzer;
     }
 
     @Scheduled(fixedDelayString = "${schedule.checks.interval}")
@@ -164,7 +168,7 @@ public class ExecutionsService {
 
         configProcessing.getDockerServices().forEach(service -> {
             try {
-                double currentLoad = metricsProcessing.getMaxMetricValueForLastHour(
+                double currentLoad = InfluxMetricsProcessing.getMaxMetricValueForLastHour(
                         "cpu", "usage_percent", service);
 
                 redisService.addLtForDay(service, currentLoad);
@@ -336,6 +340,247 @@ public class ExecutionsService {
 
     }
 
+    @Scheduled(fixedDelayString = "60000")
+    public void monitorAndAlertForAttacks() {
+        if (!configProcessing.isAttacksAnalysisAvailable()) {
+            logger.debug("Attack analysis is currently disabled in configuration");
+            return;
+        }
+
+        logger.info("Starting attack monitoring cycle");
+        Instant monitoringStart = Instant.now();
+
+        configProcessing.getDockerServices().forEach(service -> {
+            try {
+
+                logger.debug("Analyzing service {} for potential attacks", service);
+                Map<String, Object> attackResults = attacksAnalyzer.analyzeForAttacks(service);
+                processAttackResults(service, attackResults);
+
+            } catch (Exception e) {
+                logger.error("Error while monitoring service {} for attacks", service, e);
+                redisService.commentProblem(service,
+                        "Attack monitoring failed: " + e.getMessage(),
+                        "error");
+            }
+        });
+
+        logger.info("Completed attack monitoring cycle in {} ms",
+                Duration.between(monitoringStart, Instant.now()).toMillis());
+    }
+
+
+    @Scheduled(fixedDelayString = "300000")
+    public void predictAndScaleShortTerm() {
+        if (!configProcessing.isAutoPredictsAvailable()) {
+            logger.debug("Auto-scaling predictions are disabled");
+            return;
+        }
+
+        configProcessing.getDockerServices().forEach(service -> {
+            try {
+                int currentPods = dockerSwarmService.getCurrentReplicasForService(service);
+                double podCapacity = configProcessing.getMetricCriticalThreshold("cpu.usage_percent");
+
+                int requiredPods = MetricProcessing.predictRequiredPods(
+                        "cpu",
+                        "usage_percent",
+                        service,
+                        currentPods,
+                        podCapacity,
+                        configProcessing.getMinReplicasForService(service),
+                        configProcessing.getMaxReplicasForService(service),
+                        5
+                );
+
+                if (shouldScale(currentPods, requiredPods)) {
+                    scaleService(service, currentPods, requiredPods);
+                }
+            } catch (Exception e) {
+                logger.error("Scaling failed for {}", service, e);
+                redisService.commentProblem(service,
+                        "Scaling error: " + e.getMessage(), "error");
+            }
+        });
+    }
+
+    private boolean shouldScale(int current, int recommended) {
+
+        int minChange = Math.max(1, (int) Math.ceil(current * 0.25));
+        return Math.abs(recommended - current) >= minChange;
+    }
+
+    private void scaleService(String service, int current, int target) {
+        try {
+            dockerSwarmService.scaleUpService(service, target);
+            redisService.setProtectedReplicasCount(target, service);
+
+            logger.info("Scaled {}: {} -> {} pods", service, current, target);
+
+            String message = String.format(
+                    "Service scaled: %s\n" +
+                            "Replicas: %d → %d\n" +
+                            "Timestamp: %s\n" +
+                            "Decision: %s",
+                    service, current, target, Instant.now(),
+                    target > current ? "SCALE UP" : "SCALE DOWN");
+            redisService.commentProblem(service, message, "scaling");
+        } catch (Exception e) {
+            logger.error("Failed to scale {} to {} pods", service, target, e);
+            throw e;
+        }
+    }
+
+    private void processAttackResults(String service, Map<String, Object> attackResults) {
+
+        processAttackResult(service, "ddos_volumetric", attackResults,
+                (result) -> {
+                    double currentRate = (double) result.getOrDefault("current_median_rate", 0.0);
+                    double threshold = (double) result.getOrDefault("threshold", 0.0);
+                    double exceedanceRatio = (double) result.getOrDefault("exceedance_ratio", 0.0);
+                    double trendSlope = (double) result.getOrDefault("trend_slope", 0.0);
+
+                    String severity = exceedanceRatio > 0.9 || trendSlope > 1.0 ? "critical" : "warning";
+
+                    return new AlertMessage(
+                            String.format(
+                                    "DDoS alert on %s: Median rate %.2f (threshold: %.2f), " +
+                                            "Exceedance: %.1f%%, Trend: %.2f",
+                                    service, currentRate, threshold, exceedanceRatio * 100, trendSlope
+                            ),
+                            severity,
+                            Map.of(
+                                    "current_rate", currentRate,
+                                    "threshold", threshold,
+                                    "exceedance_ratio", exceedanceRatio,
+                                    "trend_slope", trendSlope,
+                                    "analysis_timestamp", Instant.now().toString()
+                            )
+                    );
+                }
+        );
+
+        processAttackResult(service, "slowloris", attackResults,
+                (result) -> {
+                    @SuppressWarnings("unchecked")
+                    List<String> suspiciousPods = (List<String>) result.getOrDefault("suspicious_pods", Collections.emptyList());
+                    int threshold = (int) result.getOrDefault("threshold", 0);
+                    @SuppressWarnings("unchecked")
+                    Map<String, Map<String, Object>> podStats = (Map<String, Map<String, Object>>)
+                            result.getOrDefault("pod_statistics", Collections.emptyMap());
+
+                    String severity = podStats.values().stream()
+                            .anyMatch(stats -> (double) stats.getOrDefault("median", 0.0) > threshold * 1.5)
+                            ? "critical" : "warning";
+
+                    String podDetails = podStats.entrySet().stream()
+                            .map(e -> String.format("%s (median: %.1f, autocorr: %.2f)",
+                                    e.getKey(),
+                                    (double) e.getValue().getOrDefault("median", 0.0),
+                                    (double) e.getValue().getOrDefault("autocorrelation", 0.0)))
+                            .collect(Collectors.joining(", "));
+
+                    return new AlertMessage(
+                            String.format(
+                                    "SlowLoris alert on %s. Suspicious pods: %s. Details: %s",
+                                    service,
+                                    suspiciousPods.isEmpty() ? "none" : String.join(", ", suspiciousPods),
+                                    podDetails
+                            ),
+                            severity,
+                            Map.of(
+                                    "suspicious_pods", suspiciousPods,
+                                    "threshold", threshold,
+                                    "pod_statistics", podStats,
+                                    "analysis_timestamp", Instant.now().toString()
+                            )
+                    );
+                }
+        );
+
+        processAttackResult(service, "dns_amplification", attackResults,
+                (result) -> {
+                    @SuppressWarnings("unchecked")
+                    List<String> suspiciousPods = (List<String>) result.getOrDefault("suspicious_pods", Collections.emptyList());
+                    int threshold = (int) result.getOrDefault("threshold", 0);
+                    @SuppressWarnings("unchecked")
+                    Map<String, Map<String, Object>> podStats = (Map<String, Map<String, Object>>)
+                            result.getOrDefault("pod_statistics", Collections.emptyMap());
+
+                    String severity = podStats.values().stream()
+                            .anyMatch(stats -> (double) stats.getOrDefault("burstiness", 0.0) > 0.9)
+                            ? "critical" : "warning";
+
+                    String podDetails = podStats.entrySet().stream()
+                            .map(e -> String.format("%s (median: %.1f, burstiness: %.2f)",
+                                    e.getKey(),
+                                    (double) e.getValue().getOrDefault("median", 0.0),
+                                    (double) e.getValue().getOrDefault("burstiness", 0.0)))
+                            .collect(Collectors.joining(", "));
+
+                    return new AlertMessage(
+                            String.format(
+                                    "DNS Amplification alert on %s. Suspicious pods: %s. Details: %s",
+                                    service,
+                                    suspiciousPods.isEmpty() ? "none" : String.join(", ", suspiciousPods),
+                                    podDetails
+                            ),
+                            severity,
+                            Map.of(
+                                    "suspicious_pods", suspiciousPods,
+                                    "threshold", threshold,
+                                    "pod_statistics", podStats,
+                                    "analysis_timestamp", Instant.now().toString()
+                            )
+                    );
+                }
+        );
+
+        if (attackResults.containsKey("statistical_analysis")) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> statsAnalysis = (Map<String, Object>) attackResults.get("statistical_analysis");
+            statsAnalysis.forEach((metric, analysis) -> {
+                logger.debug("Statistical analysis for {} on service {}: {}", metric, service, analysis);
+            });
+        }
+    }
+
+    private void processAttackResult(String service, String attackType,
+                                     Map<String, Object> attackResults,
+                                     AttackMessageFormatter formatter) {
+        try {
+            if (!attackResults.containsKey(attackType)) {
+                logger.warn("No {} results found for service {}", attackType, service);
+                return;
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> result = (Map<String, Object>) attackResults.get(attackType);
+
+            if (result != null && Boolean.TRUE.equals(result.get("detected"))) {
+
+                if(redisService.exists("attackMonitoringCooldown")) return;
+
+                AlertMessage alert = formatter.format(result);
+                redisService.commentProblem(
+                        service,
+                        alert.message() + "\n " + alert.metadata(),
+                        alert.severity()
+                );
+
+                logger.warn("{} attack detected on service {}: {}",
+                        attackType, service, alert.message());
+
+                redisService.setWithExpiry("attackMonitoringCooldown", "frozen3", 10L);
+
+            } else {
+                logger.debug("No {} attack detected on service {}", attackType, service);
+            }
+        } catch (Exception e) {
+            logger.error("Error processing {} results for service {}", attackType, service, e);
+        }
+    }
+
     private String generateDiagnosisMessage(MemoryAnalyzer.MemoryAnalysisResult result) {
         if (result.possibleLeak && result.possibleBloat) {
             return "Critical: Both memory leak and bloat detected. This indicates both sustained memory growth and erratic allocation patterns.";
@@ -352,14 +597,14 @@ public class ExecutionsService {
         String field = parts.length > 1 ? parts[1] : "value";
         int windowMinutes = configProcessing.getMetricWindowMinutes(metric);
 
-        metricsProcessing.handleMetric(measurement, field, service, windowMinutes);
+        InfluxMetricsProcessing.handleMetric(measurement, field, service, windowMinutes);
     }
 
     private void cleanupEmptyHosts(String service, String metric) {
         String[] parts = metric.split("\\.");
         String measurement = parts[0];
 
-        processing.cleanupInactiveHosts(measurement, service, 30);
+        MetricProcessing.cleanupInactiveHosts(measurement, service, 30);
     }
 
     private void sendScalingNotification(String service, int currentReplicas, int newReplicas,
@@ -404,3 +649,10 @@ public class ExecutionsService {
         return sorted[lower] * (1 - (index - lower)) + sorted[upper] * (index - lower);
     }
 }
+
+@FunctionalInterface
+interface AttackMessageFormatter {
+    AlertMessage format(Map<String, Object> result);
+}
+
+record AlertMessage(String message, String severity, Map<String, Object> metadata) {}

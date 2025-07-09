@@ -181,6 +181,29 @@
         .search-result-item small {
             color: #6c757d;
         }
+        /* Problem description styles */
+        .problem-description {
+            white-space: pre-wrap;
+            font-family: monospace;
+            background-color: #f8f9fa;
+            padding: 0.75rem;
+            border-radius: 0.25rem;
+            border-left: 3px solid #dee2e6;
+            margin-bottom: 1rem;
+        }
+        .trace-section {
+            margin-bottom: 0.5rem;
+        }
+        .trace-key {
+            font-weight: bold;
+        }
+        .error-item {
+            margin-left: 1rem;
+        }
+        .flow-item {
+            margin-left: 1rem;
+            font-family: monospace;
+        }
     </style>
 </head>
 <body>
@@ -356,7 +379,7 @@
             <div class="modal-body">
                 <div class="mb-3">
                     <h6>Problem Description:</h6>
-                    <p id="modalProblemDescription" class="fw-bold"></p>
+                    <div id="modalProblemDescription"></div>
                     <div class="d-flex gap-2">
                         <span class="badge bg-primary" id="modalServiceName"></span>
                         <span class="badge badge-conditional" id="modalConditional"></span>
@@ -475,6 +498,31 @@
         document.getElementById('filterAllLogs').addEventListener('click', () => filterLogs('all'));
         document.getElementById('filterErrorLogs').addEventListener('click', () => filterLogs('error'));
         document.getElementById('filterWarningLogs').addEventListener('click', () => filterLogs('warning'));
+
+        // Comment form submission
+        document.getElementById('addCommentForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const uuid = currentProblemUuid;
+            const comment = document.getElementById('commentText').value;
+
+            if (!comment.trim()) {
+                showAlert('Comment cannot be empty', 'warning');
+                return;
+            }
+
+            try {
+                await fetchData(`${API_BASE}/${uuid}/comments`, 'POST', { comment });
+
+                showAlert('Comment added successfully!', 'success');
+                document.getElementById('addCommentForm').reset();
+                bootstrap.Modal.getInstance(document.getElementById('addCommentModal')).hide();
+
+                showProblemDetails(uuid);
+            } catch (error) {
+                console.error('Error adding comment:', error);
+                showAlert('Failed to add comment: ' + error.message, 'danger');
+            }
+        });
     });
 
     function loadDashboardData() {
@@ -599,10 +647,28 @@
             card.className = 'card problem-card mb-3 cursor-pointer';
             card.addEventListener('click', () => showProblemDetails(problem.id));
 
+            // Create a clean description for the card
+            let cleanDescription = problem.description;
+
+            // For trace descriptions, show just the main service and error
+            if (problem.description.includes('Main Service') && problem.description.includes('Problems Detected')) {
+                const mainServiceMatch = problem.description.match(/Main Service ([^\n]*)/);
+                const problemsMatch = problem.description.match(/Problems Detected ([^\n]*)/);
+
+                if (mainServiceMatch && problemsMatch) {
+                    cleanDescription = `${mainServiceMatch[1]}: ${problemsMatch[1].split('-')[1] || problemsMatch[1]}`;
+                }
+            }
+            // For multi-part descriptions, show just the first part
+            else if (problem.description.includes('**')) {
+                const parts = problem.description.split('**');
+                cleanDescription = parts.slice(0, 4).join(' ').substring(0, 80);
+            }
+
             card.innerHTML = `
                 <div class="card-body">
                     <div class="d-flex justify-content-between">
-                        <h5 class="card-title">${problem.description.substring(0, 80)}${problem.description.length > 80 ? '...' : ''}</h5>
+                        <h5 class="card-title">${cleanDescription.substring(0, 80)}${cleanDescription.length > 80 ? '...' : ''}</h5>
                         <span class="badge bg-primary">${problem.serviceName}</span>
                     </div>
                     <div class="mt-2">
@@ -725,7 +791,7 @@
 
             document.getElementById('modalServiceName').textContent = currentServiceName;
             document.getElementById('modalConditional').textContent = metadata.conditional || 'Unknown';
-            document.getElementById('modalProblemDescription').textContent = problem.description;
+            document.getElementById('modalProblemDescription').innerHTML = formatProblemDescription(problem.description);
             document.getElementById('problemModalTitle').textContent = `Problem Details (ID: ${uuidToFetch})`;
 
             const timestamp = new Date(currentProblemTimestamp);
@@ -751,6 +817,65 @@
             console.error('Error showing problem details:', error);
             showAlert('Failed to load problem details: ' + error.message, 'danger');
         }
+    }
+
+    function formatProblemDescription(description) {
+        // Check if this is a trace description
+        if (description.includes('Trace ID') || description.includes('Main Service')) {
+            return formatTraceDescription(description);
+        }
+        // Default formatting
+        return `<div class="problem-description">${description}</div>`;
+    }
+
+    function formatTraceDescription(description) {
+        // Split into lines first
+        const lines = description.split('\n');
+        let formatted = '<div class="problem-description">';
+
+        for (const line of lines) {
+            if (line.trim() === '') continue;
+
+            if (line.startsWith('Trace ID')) {
+                formatted += `<div class="trace-section"><span class="trace-key">Trace ID</span> ${line.replace('Trace ID', '').trim()}</div>`;
+            }
+            else if (line.startsWith('Main Service')) {
+                formatted += `<div class="trace-section"><span class="trace-key">Main Service</span> ${line.replace('Main Service', '').trim()}</div>`;
+            }
+            else if (line.startsWith('Total Duration')) {
+                formatted += `<div class="trace-section"><span class="trace-key">Total Duration</span> ${line.replace('Total Duration', '').trim()}</div>`;
+            }
+            else if (line.startsWith('Problems Detected')) {
+                formatted += `<div class="trace-section"><span class="trace-key">Problems Detected</span>`;
+                // The next lines are the problems list
+                const problems = line.replace('Problems Detected', '').split('-').filter(p => p.trim() !== '');
+                problems.forEach(p => {
+                    formatted += `<div class="error-item">- ${p.trim()}</div>`;
+                });
+                formatted += `</div>`;
+            }
+            else if (line.startsWith('Request Flow')) {
+                formatted += `<div class="trace-section"><span class="trace-key">Request Flow</span>`;
+                // The next lines are the flow items
+                const flowItems = line.replace('Request Flow', '').split('[').filter(f => f.trim() !== '');
+                flowItems.forEach(f => {
+                    if (f.trim()) {
+                        formatted += `<div class="flow-item">[${f.trim()}</div>`;
+                    }
+                });
+                formatted += `</div>`;
+            }
+            else if (line.startsWith('Similar Problem IDs')) {
+                const ids = line.replace('Similar Problem IDs', '').trim();
+                formatted += `<div class="trace-section"><span class="trace-key">Similar Problem IDs</span> ${ids}</div>`;
+            }
+            else {
+                formatted += `<div>${line}</div>`;
+            }
+        }
+
+        formatted += '</div>';
+        return formatted;
     }
 
     async function fetchAndDisplayLogs() {
@@ -872,30 +997,6 @@
     function hideLogsSection() {
         document.getElementById('logsSection').classList.add('d-none');
     }
-
-    document.getElementById('addCommentForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const uuid = currentProblemUuid;
-        const comment = document.getElementById('commentText').value;
-
-        if (!comment.trim()) {
-            showAlert('Comment cannot be empty', 'warning');
-            return;
-        }
-
-        try {
-            await fetchData(`${API_BASE}/${uuid}/comments`, 'POST', { comment });
-
-            showAlert('Comment added successfully!', 'success');
-            document.getElementById('addCommentForm').reset();
-            bootstrap.Modal.getInstance(document.getElementById('addCommentModal')).hide();
-
-            showProblemDetails(uuid);
-        } catch (error) {
-            console.error('Error adding comment:', error);
-            showAlert('Failed to add comment: ' + error.message, 'danger');
-        }
-    });
 
     function showAlert(message, type) {
         const alert = document.createElement('div');

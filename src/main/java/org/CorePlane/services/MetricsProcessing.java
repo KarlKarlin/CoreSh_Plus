@@ -108,20 +108,6 @@ public class MetricsProcessing {
         return extractValuesFromResult(result);
     }
 
-    public Map<Instant, Double> getMetricsWithTimestampsInWindow(String measurement,
-                                                                 String field,
-                                                                 String serviceName,
-                                                                 int minutes) {
-        long windowMs = minutes * 60 * 1000L;
-        String query = String.format(
-                "SELECT \"%s\" FROM \"%s\" WHERE \"service\" = '%s' " +
-                        "AND time > now() - %dms ORDER BY time ASC",
-                field, measurement, serviceName, windowMs);
-
-        QueryResult result = influxDB.query(new Query(query, db));
-        return extractTimestampsAndValuesFromResult(result);
-    }
-
     public Map<String, Map<Instant, Double>> getMetricsByPod(String measurement,
                                                              String field,
                                                              String serviceName,
@@ -134,6 +120,43 @@ public class MetricsProcessing {
 
         QueryResult result = influxDB.query(new Query(query, db));
         return extractGroupedMetricsFromResult(result);
+    }
+
+    public int predictRequiredPods(String measurement,
+                                   String field,
+                                   String serviceName,
+                                   int currentPods,
+                                   double podCapacity,
+                                   int minPods,
+                                   int maxPods,
+                                   int predictionWindowMinutes) {
+        List<Double> recentMetrics = getMetricsInTimeWindow(
+                measurement, field, serviceName, predictionWindowMinutes);
+
+        if (recentMetrics.isEmpty()) {
+            return currentPods;
+        }
+
+        KalmanFilter kf = new KalmanFilter(0.01, 0.1);
+        for (double metric : recentMetrics) {
+            kf.update(metric);
+        }
+
+        double predictedLoad = kf.predictNext();
+        double safetyFactor = 1.2;
+        double effectiveCapacity = podCapacity * safetyFactor;
+
+        int requiredPods = (int) Math.ceil(predictedLoad / effectiveCapacity);
+        requiredPods = Math.max(minPods, Math.min(maxPods, requiredPods));
+
+        if (requiredPods < currentPods) {
+            double utilizationThreshold = 0.7;
+            if (predictedLoad > (currentPods - 1) * podCapacity * utilizationThreshold) {
+                return currentPods;
+            }
+        }
+
+        return requiredPods;
     }
 
     private List<Double> extractValuesFromResult(QueryResult result) {

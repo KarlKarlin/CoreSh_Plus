@@ -176,4 +176,38 @@ public class ConfigProcessing {
         Map<String, Object> metricThresholds = (Map<String, Object>) thresholds.getOrDefault(metric, new HashMap<>());
         return (double) metricThresholds.getOrDefault("critical", 90.0);
     }
+
+    public boolean isAttacksAnalysisAvailable(){
+        Map<String, Object> data = getConfigFromYaml();
+        return (boolean) data.getOrDefault("attack_detection_available", false);
+    }
+
+    public Map<String, String> getAttackDetectionFields() {
+        Map<String, Object> config = getConfigFromYaml();
+        Map<String, Object> attacksConfig = (Map<String, Object>) config.getOrDefault("attacks_detection", new HashMap<>());
+        Map<String, String> fields = new HashMap<>();
+
+        fields.put("request_rate", "value");
+        fields.put("open_connections", "value");
+        fields.put("dns_queries", "value");
+
+        Map<String, Object> fieldConfig = (Map<String, Object>) attacksConfig.getOrDefault("fields", new HashMap<>());
+        fieldConfig.forEach((metric, field) -> fields.put(metric, field.toString()));
+
+        return fields;
+    }
+
+    public Map<String, Integer> getAttackDetectionThresholds() {
+        Map<String, Object> config = getConfigFromYaml();
+        Map<String, Object> attacksConfig = (Map<String, Object>) config.getOrDefault("attacks_detection", new HashMap<>());
+        Map<String, Integer> thresholds = new HashMap<>();
+
+        thresholds.put("slowloris_connections", 100);
+        thresholds.put("dns_query_spike", 1000);
+
+        Map<String, Object> thresholdConfig = (Map<String, Object>) attacksConfig.getOrDefault("thresholds", new HashMap<>());
+        thresholdConfig.forEach((key, value) -> thresholds.put(key, Integer.parseInt(value.toString())));
+
+        return thresholds;
+    }
 }

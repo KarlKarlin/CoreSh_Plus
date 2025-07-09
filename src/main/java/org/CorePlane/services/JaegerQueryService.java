@@ -3,6 +3,8 @@ package org.CorePlane.services;
 import com.fasterxml.jackson.core.type.TypeReference;
 import org.CorePlane.configurations.ConfigProcessing;
 import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
@@ -17,6 +19,10 @@ import java.util.stream.Collectors;
 
 @Service
 public class JaegerQueryService {
+    private static final Logger logger = LoggerFactory.getLogger(JaegerQueryService.class);
+    private static final long MICROS_PER_SECOND = 1_000_000L;
+    private static final long MICROS_PER_MINUTE = 60 * MICROS_PER_SECOND;
+    private static final long MICROS_PER_HOUR = 60 * MICROS_PER_MINUTE;
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -27,7 +33,8 @@ public class JaegerQueryService {
     @Value("${jaeger.url}")
     private String jaegerQueryUrl;
 
-    public JaegerQueryService(RestTemplate restTemplate, ObjectMapper objectMapper, ConfigProcessing configProcessing, RedisService redisService) {
+    public JaegerQueryService(RestTemplate restTemplate, ObjectMapper objectMapper,
+                              ConfigProcessing configProcessing, RedisService redisService) {
         this.restTemplate = restTemplate;
         this.objectMapper = objectMapper;
         this.configProcessing = configProcessing;
@@ -44,14 +51,14 @@ public class JaegerQueryService {
             }
             return fetchAndParseTraceDetails(traceIds.get(0));
         } catch (Exception e) {
+            logger.error("Failed to get last error trace for service: {}", serviceName, e);
             redisService.commentProblem(serviceName, "Failed to get error trace details for service", "notification");
             return new ErrorTraceInfo(null, serviceName, "Error fetching trace", e.getMessage());
         }
     }
 
     public List<String> fetchErrorTraceIdsForService(String serviceName, long lookbackHours, int limit) throws IOException {
-
-        long lookbackMicros = lookbackHours * 3_600_000_000L;
+        long lookbackMicros = lookbackHours * MICROS_PER_HOUR;
         long endTimeMicros = System.currentTimeMillis() * 1000;
         long startTimeMicros = endTimeMicros - lookbackMicros;
 
@@ -73,11 +80,15 @@ public class JaegerQueryService {
         );
 
         JsonNode rootNode = objectMapper.readTree(response.getBody());
-        JsonNode dataNode = rootNode.path("data");
+        if (!rootNode.has("data")) {
+            throw new IOException("Invalid response format from Jaeger - missing data field");
+        }
 
+        JsonNode dataNode = rootNode.path("data");
         return objectMapper.convertValue(dataNode, new TypeReference<List<Map<String, Object>>>() {})
                 .stream()
                 .map(trace -> (String) trace.get("traceID"))
+                .filter(Objects::nonNull)
                 .collect(Collectors.toList());
     }
 
@@ -97,7 +108,15 @@ public class JaegerQueryService {
         JsonNode rootNode = objectMapper.readTree(response.getBody());
         JsonNode traceData = rootNode.path("data").get(0);
 
-        String serviceName = traceData.path("processes").path("p1").path("serviceName").asText();
+        if (traceData == null) {
+            return new ErrorTraceInfo(traceId, "unknown", "No trace data found", null);
+        }
+
+        // Get first process's service name
+        Iterator<Map.Entry<String, JsonNode>> processes = traceData.path("processes").fields();
+        String serviceName = processes.hasNext() ?
+                processes.next().getValue().path("serviceName").asText() : "unknown";
+
         String operationName = null;
         String errorMessage = "Unknown error";
         String httpStatus = null;
@@ -132,10 +151,26 @@ public class JaegerQueryService {
         return new ErrorTraceInfo(traceId, serviceName, operationName, errorMessage);
     }
 
+    private String buildErrorDetails(String exceptionClass, String errorMessage, String httpStatus) {
+        StringBuilder details = new StringBuilder();
+        if (exceptionClass != null) {
+            details.append(exceptionClass).append(": ");
+        }
+        details.append(errorMessage);
+        if (httpStatus != null) {
+            details.append(" (HTTP ").append(httpStatus).append(")");
+        }
+        return details.toString();
+    }
+
     private boolean isErrorSpan(JsonNode span) {
         for (JsonNode tag : span.path("tags")) {
-            if ("error".equals(tag.path("key").asText()) &&
-                    "true".equals(tag.path("value").asText())) {
+            String key = tag.path("key").asText();
+            String value = tag.path("value").asText();
+
+            if (("error".equals(key) && "true".equals(value)) ||
+                    (key.startsWith("error.")) ||
+                    ("http.status_code".equals(key) && value.matches("5\\d\\d"))) {
                 return true;
             }
         }
@@ -143,7 +178,7 @@ public class JaegerQueryService {
     }
 
     public List<String> getAllTracesForService(String serviceName, long lookbackHours) throws IOException {
-        long lookbackMicros = lookbackHours * 3_600_000_000L;
+        long lookbackMicros = lookbackHours * MICROS_PER_HOUR;
         long endTimeMicros = System.currentTimeMillis() * 1000;
         long startTimeMicros = endTimeMicros - lookbackMicros;
 
@@ -168,19 +203,8 @@ public class JaegerQueryService {
         return objectMapper.convertValue(dataNode, new TypeReference<List<Map<String, Object>>>() {})
                 .stream()
                 .map(trace -> (String) trace.get("traceID"))
+                .filter(Objects::nonNull)
                 .collect(Collectors.toList());
-    }
-
-    private String buildErrorDetails(String exceptionClass, String errorMessage, String httpStatus) {
-        StringBuilder details = new StringBuilder();
-        if (exceptionClass != null) {
-            details.append(exceptionClass).append(": ");
-        }
-        details.append(errorMessage);
-        if (httpStatus != null) {
-            details.append(" (HTTP ").append(httpStatus).append(")");
-        }
-        return details.toString();
     }
 
     public int getErrorTracesCount(String serviceName, long lookbackHours) {
@@ -188,6 +212,7 @@ public class JaegerQueryService {
             List<String> traceIds = fetchErrorTraceIdsForService(serviceName, lookbackHours, 100);
             return traceIds.size();
         } catch (Exception e) {
+            logger.error("Failed to get error traces count for service: {}", serviceName, e);
             redisService.commentProblem(serviceName, "Failed to get error trace details for service", "notification");
             return 0;
         }
@@ -195,7 +220,6 @@ public class JaegerQueryService {
 
     public List<String> getTraceIdsForWaterfall() {
         try {
-
             String mainService = configProcessing.getMainJaegerService();
             int windowMinutes = configProcessing.getWindowMinutesForJaeger();
             int analysisPercentage = configProcessing.getAnalysisPercentage();
@@ -205,21 +229,50 @@ public class JaegerQueryService {
             }
 
             double lookbackHours = windowMinutes / 60.0;
-
             int totalTraces = getTotalTracesCount(mainService, lookbackHours);
-
             int tracesToFetch = (int) Math.ceil(totalTraces * (analysisPercentage / 100.0));
 
-            return fetchTraceIdsForService(mainService, lookbackHours, tracesToFetch);
-
+            return fetchTraceIdsForService(mainService, lookbackHours, Math.max(1, tracesToFetch));
         } catch (Exception e) {
+            logger.error("Failed to get trace IDs for waterfall analysis", e);
             redisService.commentProblem("Unknown", "Failed to get trace IDs for waterfall analysis", "notification");
             return Collections.emptyList();
         }
     }
 
+    private List<String> fetchTraceIdsForService(String serviceName, double lookbackHours, int limit) throws IOException {
+        long lookbackMicros = (long)(lookbackHours * MICROS_PER_HOUR);
+        long endTimeMicros = System.currentTimeMillis() * 1000;
+        long startTimeMicros = endTimeMicros - lookbackMicros;
+
+        URI uri = UriComponentsBuilder.fromHttpUrl(jaegerQueryUrl)
+                .path("/api/traces")
+                .queryParam("service", serviceName)
+                .queryParam("limit", limit)
+                .queryParam("start", startTimeMicros)
+                .queryParam("end", endTimeMicros)
+                .build()
+                .toUri();
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                uri,
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                String.class
+        );
+
+        JsonNode rootNode = objectMapper.readTree(response.getBody());
+        JsonNode dataNode = rootNode.path("data");
+
+        return objectMapper.convertValue(dataNode, new TypeReference<List<Map<String, Object>>>() {})
+                .stream()
+                .map(trace -> (String) trace.get("traceID"))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
     private int getTotalTracesCount(String serviceName, double lookbackHours) throws IOException {
-        long lookbackMicros = (long)(lookbackHours * 3_600_000_000L);
+        long lookbackMicros = (long)(lookbackHours * MICROS_PER_HOUR);
         long endTimeMicros = System.currentTimeMillis() * 1000;
         long startTimeMicros = endTimeMicros - lookbackMicros;
 
@@ -248,17 +301,9 @@ public class JaegerQueryService {
         return rootNode.path("data").size();
     }
 
-    private List<String> fetchTraceIdsForService(String serviceName, double lookbackHours, int limit) throws IOException {
-        long lookbackMicros = (long)(lookbackHours * 3_600_000_000L);
-        long endTimeMicros = System.currentTimeMillis() * 1000;
-        long startTimeMicros = endTimeMicros - lookbackMicros;
-
+    public List<TraceSpan> getCompleteTrace(String traceId) throws IOException {
         URI uri = UriComponentsBuilder.fromHttpUrl(jaegerQueryUrl)
-                .path("/api/traces")
-                .queryParam("service", serviceName)
-                .queryParam("limit", limit)
-                .queryParam("start", startTimeMicros)
-                .queryParam("end", endTimeMicros)
+                .path("/api/traces/" + traceId)
                 .build()
                 .toUri();
 
@@ -270,92 +315,58 @@ public class JaegerQueryService {
         );
 
         JsonNode rootNode = objectMapper.readTree(response.getBody());
-        JsonNode dataNode = rootNode.path("data");
-
-        return objectMapper.convertValue(dataNode, new TypeReference<List<Map<String, Object>>>() {})
-                .stream()
-                .map(trace -> (String) trace.get("traceID"))
-                .collect(Collectors.toList());
-    }
-
-    public Map<String, Object> getWaterfallAnalysisMetrics() {
-        Map<String, Object> metrics = new HashMap<>();
-        try {
-            String mainService = configProcessing.getMainJaegerService();
-            int windowMinutes = configProcessing.getWindowMinutesForJaeger();
-            int analysisPercentage = configProcessing.getAnalysisPercentage();
-            double lookbackHours = windowMinutes / 60.0;
-
-            long lookbackMicros = (long)(lookbackHours * 3_600_000_000L);
-            long endTimeMicros = System.currentTimeMillis() * 1000;
-            long startTimeMicros = endTimeMicros - lookbackMicros;
-
-            int totalTraces = getTotalTracesCount(mainService, lookbackHours);
-            int sampledTraces = (int) Math.ceil(totalTraces * (analysisPercentage / 100.0));
-
-            metrics.put("totalTraces", totalTraces);
-            metrics.put("sampledTraces", sampledTraces);
-            metrics.put("samplingPercentage", analysisPercentage);
-            metrics.put("timeWindowMinutes", windowMinutes);
-            metrics.put("mainService", mainService);
-
-        } catch (Exception e) {
-            redisService.commentProblem("Unknown", "Failed to get waterfall analysis metrics", "notification");
-            metrics.put("error", e.getMessage());
+        if (rootNode == null || !rootNode.has("data") || !rootNode.get("data").isArray()) {
+            throw new IOException("Invalid trace data format from Jaeger");
         }
-        return metrics;
-    }
 
-    public Optional<TraceSpan> getTraceSpan(String traceId, String serviceName) {
-        try {
-            URI uri = UriComponentsBuilder.fromHttpUrl(jaegerQueryUrl)
-                    .path("/api/traces/" + traceId)
-                    .queryParam("service", serviceName)
-                    .build()
-                    .toUri();
+        JsonNode traceData = rootNode.path("data").get(0);
+        if (traceData == null) {
+            return Collections.emptyList();
+        }
 
-            ResponseEntity<String> response = restTemplate.exchange(
-                    uri,
-                    HttpMethod.GET,
-                    new HttpEntity<>(headers),
-                    String.class
-            );
+        Map<String, String> processIdToService = new HashMap<>();
+        traceData.path("processes").fields().forEachRemaining(entry -> {
+            processIdToService.put(entry.getKey(), entry.getValue().path("serviceName").asText());
+        });
 
-            JsonNode rootNode = objectMapper.readTree(response.getBody());
-            JsonNode traceData = rootNode.path("data").get(0);
+        List<TraceSpan> spans = new ArrayList<>();
+        for (JsonNode span : traceData.path("spans")) {
+            String processId = span.path("processID").asText();
+            String serviceName = processIdToService.get(processId);
+            if (serviceName == null) continue;
 
-            if (traceData == null || traceData.isNull()) {
-                return Optional.empty();
-            }
-
-            for (JsonNode span : traceData.path("spans")) {
-                String processId = span.path("processID").asText();
-                JsonNode process = traceData.path("processes").path(processId);
-
-                if (serviceName.equals(process.path("serviceName").asText())) {
-                    long startTime = span.path("startTime").asLong();
-                    long duration = span.path("duration").asLong();
-                    String operationName = span.path("operationName").asText();
-
-                    Map<String, String> tags = new HashMap<>();
-                    for (JsonNode tag : span.path("tags")) {
-                        tags.put(tag.path("key").asText(), tag.path("value").asText());
+            String parentSpanId = null;
+            JsonNode references = span.path("references");
+            if (references.size() > 0) {
+                for (JsonNode ref : references) {
+                    if ("CHILD_OF".equals(ref.path("refType").asText())) {
+                        parentSpanId = ref.path("spanID").asText();
+                        break;
                     }
-
-                    return Optional.of(new TraceSpan(
-                            traceId,
-                            serviceName,
-                            operationName,
-                            startTime,
-                            duration,
-                            tags
-                    ));
                 }
             }
-        } catch (Exception e) {
-            redisService.commentProblem("Unknown", "Failed to get waterfall analysis metrics", "notification");
+
+            Map<String, String> tags = new HashMap<>();
+            span.path("tags").forEach(tag -> {
+                String key = tag.path("key").asText();
+                JsonNode valueNode = tag.path("value");
+                String value = valueNode.isValueNode() ? valueNode.asText() : valueNode.toString();
+                tags.put(key, value);
+            });
+
+            spans.add(new TraceSpan(
+                    traceId,
+                    serviceName,
+                    span.path("operationName").asText(),
+                    span.path("startTime").asLong(),
+                    span.path("duration").asLong(),
+                    tags,
+                    parentSpanId,
+                    span.path("spanID").asText()
+            ));
         }
-        return Optional.empty();
+
+        return spans;
     }
 
     public record ErrorTraceInfo(
@@ -383,24 +394,35 @@ public class JaegerQueryService {
         private final long startTime;
         private final double duration;
         private final Map<String, String> tags;
+        private final String parentSpanId;
+        private final String spanId;
 
         public TraceSpan(String traceId, String serviceName, String operationName,
-                         long startTime, double duration, Map<String, String> tags) {
+                         long startTime, double duration, Map<String, String> tags,
+                         String parentSpanId, String spanId) {
             this.traceId = traceId;
             this.serviceName = serviceName;
             this.operationName = operationName;
             this.startTime = startTime;
             this.duration = duration;
             this.tags = new HashMap<>(tags);
+            this.parentSpanId = parentSpanId;
+            this.spanId = spanId;
         }
 
         public boolean isError() {
-            return "true".equals(tags.get("error"));
+            return "true".equals(tags.get("error")) ||
+                    tags.keySet().stream().anyMatch(k -> k.startsWith("error.")) ||
+                    tags.entrySet().stream()
+                            .filter(e -> "http.status_code".equals(e.getKey()))
+                            .anyMatch(e -> e.getValue().matches("5\\d\\d"));
         }
 
         public Map<String, String> getErrorTags() {
             return tags.entrySet().stream()
-                    .filter(e -> e.getKey().startsWith("error.") || e.getKey().startsWith("http.status_code"))
+                    .filter(e -> e.getKey().startsWith("error.") ||
+                            "http.status_code".equals(e.getKey()) ||
+                            "exception.class".equals(e.getKey()))
                     .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
         }
 
@@ -410,5 +432,7 @@ public class JaegerQueryService {
         public long getStartTime() { return startTime; }
         public double getDuration() { return duration; }
         public Map<String, String> getTags() { return Collections.unmodifiableMap(tags); }
+        public String getParentSpanId() { return parentSpanId; }
+        public String getSpanId() { return spanId; }
     }
 }
