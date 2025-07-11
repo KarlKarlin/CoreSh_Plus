@@ -1,6 +1,8 @@
 package org.CorePlane.services;
 
 import org.CorePlane.configurations.ConfigProcessing;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.util.*;
@@ -8,31 +10,240 @@ import java.util.stream.Collectors;
 
 @Service
 public class AttacksAnalyzer {
+    private static final Logger logger = LoggerFactory.getLogger(AttacksAnalyzer.class);
+
     private static final int SHORT_WINDOW_MINUTES = 5;
     private static final int LONG_WINDOW_MINUTES = 60;
     private static final int MIN_DATA_POINTS_FOR_ANALYSIS = 10;
 
+    private static final double SMOOTHING_FACTOR = 0.01;
+    private static final double HISTORICAL_WEIGHT = 0.6;
+    private static final double DEFAULT_WEIGHT = 0.4;
+    private static final double MIN_PROBABILITY_THRESHOLD = 0.01;
+
+    private static final String STATE_NORMAL = "NORMAL";
+    private static final String STATE_DDOS = "DDoS_VOLUMETRIC";
+    private static final String STATE_SLOWLORIS = "SLOWLORIS";
+    private static final String STATE_DNS_AMP = "DNS_AMPLIFICATION";
+
     private final MetricsProcessing metricsProcessing;
+    private final RedisService redisService;
     private final Map<String, String> detectionFields;
     private final Map<String, Integer> detectionThresholds;
+    private final Map<String, Map<String, Double>> markovChainStates;
 
-    public AttacksAnalyzer(MetricsProcessing metricsProcessing, ConfigProcessing configProcessing) {
+    public AttacksAnalyzer(MetricsProcessing metricsProcessing,
+                           ConfigProcessing configProcessing,
+                           RedisService redisService) {
         this.metricsProcessing = metricsProcessing;
+        this.redisService = redisService;
         this.detectionFields = configProcessing.getAttackDetectionFields();
         this.detectionThresholds = configProcessing.getAttackDetectionThresholds();
+        this.markovChainStates = initializeMarkovStates();
+    }
+
+    private Map<String, Map<String, Double>> initializeMarkovStates() {
+        Map<String, Map<String, Double>> states = new HashMap<>();
+
+        states.put(STATE_NORMAL, Map.of(
+                STATE_NORMAL, 0.9,
+                STATE_DDOS, 0.06,
+                STATE_SLOWLORIS, 0.02,
+                STATE_DNS_AMP, 0.02
+        ));
+
+        states.put(STATE_DDOS, Map.of(
+                STATE_NORMAL, 0.3,
+                STATE_DDOS, 0.6,
+                STATE_SLOWLORIS, 0.05,
+                STATE_DNS_AMP, 0.05
+        ));
+
+        states.put(STATE_SLOWLORIS, Map.of(
+                STATE_NORMAL, 0.3,
+                STATE_DDOS, 0.05,
+                STATE_SLOWLORIS, 0.6,
+                STATE_DNS_AMP, 0.05
+        ));
+
+        states.put(STATE_DNS_AMP, Map.of(
+                STATE_NORMAL, 0.3,
+                STATE_DDOS, 0.05,
+                STATE_SLOWLORIS, 0.05,
+                STATE_DNS_AMP, 0.6
+        ));
+
+        return states;
     }
 
     public Map<String, Object> analyzeForAttacks(String serviceName) {
         Map<String, Object> results = new HashMap<>();
         try {
-            results.put("ddos_volumetric", detectVolumetricDDoS(serviceName));
-            results.put("slowloris", detectSlowLoris(serviceName));
-            results.put("dns_amplification", detectDnsAmplification(serviceName));
+            Map<String, Object> ddosResult = detectVolumetricDDoS(serviceName);
+            Map<String, Object> slowlorisResult = detectSlowLoris(serviceName);
+            Map<String, Object> dnsResult = detectDnsAmplification(serviceName);
+
+            results.put("ddos_volumetric", ddosResult);
+            results.put("slowloris", slowlorisResult);
+            results.put("dns_amplification", dnsResult);
             results.put("statistical_analysis", performStatisticalAnalysis(serviceName));
+
+            updateMarkovState(serviceName, results);
+
         } catch (Exception e) {
+            logger.error("Analysis failed for service {}: {}", serviceName, e.getMessage(), e);
             results.put("error", "Analysis failed: " + e.getMessage());
         }
         return results;
+    }
+
+    public Map<String, Object> predictAttackProbabilities(String serviceName) {
+        Map<String, Object> results = new HashMap<>();
+        String redisKey = serviceName + ":AttackAnalyzer";
+
+        try {
+            boolean lockAcquired = redisService.acquireLock(redisKey);
+            if (!lockAcquired) {
+                results.put("error", "Could not acquire lock for prediction");
+                return results;
+            }
+
+            try {
+                String lastState = redisService.getLastState(redisKey);
+                if (lastState == null) {
+                    Map<String, Double> initialProbs = Map.of(
+                            STATE_NORMAL, 0.85,
+                            STATE_DDOS, 0.08,
+                            STATE_SLOWLORIS, 0.04,
+                            STATE_DNS_AMP, 0.03
+                    );
+
+                    results.put("current_state", STATE_NORMAL);
+                    results.put("next_state_probabilities", initialProbs);
+                    results.put("most_likely_next_state", STATE_NORMAL);
+                    return results;
+                }
+
+                Map<String, Integer> transitions = redisService.getTransitionProbabilities(redisKey, lastState);
+                Map<String, Double> nextStateProbabilities = calculateNextStateProbabilities(lastState, transitions);
+
+                results.put("current_state", lastState);
+                results.put("next_state_probabilities", nextStateProbabilities);
+                results.put("most_likely_next_state", getMostLikelyState(nextStateProbabilities));
+
+            } finally {
+                redisService.releaseLock(redisKey);
+            }
+
+        } catch (Exception e) {
+            logger.error("Prediction failed for service {}: {}", serviceName, e.getMessage(), e);
+            results.put("error", "Prediction failed: " + e.getMessage());
+        }
+        return results;
+    }
+
+    private Map<String, Double> calculateNextStateProbabilities(String currentState, Map<String, Integer> transitions) {
+        Map<String, Double> probabilities = new HashMap<>();
+        Map<String, Double> defaultProbs = markovChainStates.getOrDefault(currentState,
+                Map.of(STATE_NORMAL, 1.0));
+
+        if (transitions == null || transitions.isEmpty()) {
+            return applySmoothing(new HashMap<>(defaultProbs));
+        }
+
+        int totalHistorical = transitions.values().stream().mapToInt(Integer::intValue).sum();
+
+        defaultProbs.keySet().forEach(state -> {
+            double historicalCount = transitions.getOrDefault(state, 0);
+            double historicalWeight = calculateHistoricalWeight(historicalCount, totalHistorical);
+            double defaultProb = defaultProbs.getOrDefault(state, MIN_PROBABILITY_THRESHOLD);
+
+            double combinedProb = (HISTORICAL_WEIGHT * historicalWeight) +
+                    (DEFAULT_WEIGHT * defaultProb);
+
+            probabilities.put(state, combinedProb);
+        });
+
+        return normalizeProbabilities(applySmoothing(probabilities));
+    }
+
+    private double calculateHistoricalWeight(double count, double total) {
+        if (total == 0) return 0;
+        return Math.log1p(count) / Math.log1p(total);
+    }
+
+    private Map<String, Double> applySmoothing(Map<String, Double> probabilities) {
+        probabilities.replaceAll((k, v) -> Math.max(v, MIN_PROBABILITY_THRESHOLD) + SMOOTHING_FACTOR);
+        return probabilities;
+    }
+
+    private Map<String, Double> normalizeProbabilities(Map<String, Double> probabilities) {
+        double sum = probabilities.values().stream().mapToDouble(Double::doubleValue).sum();
+
+        if (sum <= 0) {
+            double uniformProb = 1.0 / probabilities.size();
+            probabilities.replaceAll((k, v) -> uniformProb);
+            return probabilities;
+        }
+
+        probabilities.replaceAll((k, v) -> {
+            double normalized = v / sum;
+            return normalized < MIN_PROBABILITY_THRESHOLD ? MIN_PROBABILITY_THRESHOLD : normalized;
+        });
+
+        double newSum = probabilities.values().stream().mapToDouble(Double::doubleValue).sum();
+        probabilities.replaceAll((k, v) -> v / newSum);
+
+        return probabilities;
+    }
+
+    private void updateMarkovState(String serviceName, Map<String, Object> detectionResults) {
+        String currentState = determineCurrentState(detectionResults);
+        String redisKey = serviceName + ":AttackAnalyzer";
+
+        try {
+            boolean lockAcquired = redisService.acquireLock(redisKey);
+            if (!lockAcquired) {
+                logger.warn("Failed to acquire lock for state update: {}", serviceName);
+                return;
+            }
+
+            String lastState = redisService.getLastState(redisKey);
+            if (lastState == null) {
+                lastState = STATE_NORMAL;
+            }
+
+            if (!currentState.equals(lastState)) {
+                redisService.saveStateTransition(redisKey, lastState, currentState);
+            }
+
+        } catch (Exception e) {
+            logger.error("Error updating state for service {}: {}", serviceName, e.getMessage(), e);
+        } finally {
+            redisService.releaseLock(redisKey);
+        }
+    }
+
+    private String determineCurrentState(Map<String, Object> detectionResults) {
+        try {
+            boolean ddosDetected = (boolean) ((Map<?, ?>) detectionResults.get("ddos_volumetric")).get("detected");
+            boolean slowlorisDetected = (boolean) ((Map<?, ?>) detectionResults.get("slowloris")).get("detected");
+            boolean dnsDetected = (boolean) ((Map<?, ?>) detectionResults.get("dns_amplification")).get("detected");
+
+            if (ddosDetected) return STATE_DDOS;
+            if (slowlorisDetected) return STATE_SLOWLORIS;
+            if (dnsDetected) return STATE_DNS_AMP;
+        } catch (Exception e) {
+            logger.error("Error determining current state", e);
+        }
+        return STATE_NORMAL;
+    }
+
+    private String getMostLikelyState(Map<String, Double> probabilities) {
+        return probabilities.entrySet().stream()
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(STATE_NORMAL);
     }
 
     private Map<String, Object> detectVolumetricDDoS(String serviceName) {
@@ -190,7 +401,58 @@ public class AttacksAnalyzer {
         return analysis;
     }
 
-    // All mathematical calculation methods remain exactly the same
+    public Map<String, Object> getComprehensiveAnalysis(String serviceName) {
+        Map<String, Object> analysis = analyzeForAttacks(serviceName);
+        Map<String, Object> prediction = predictAttackProbabilities(serviceName);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("current_analysis", analysis);
+        result.put("prediction", prediction);
+        result.put("risk_assessment", calculateCombinedRisk(analysis, prediction));
+
+        return result;
+    }
+
+    private Map<String, Object> calculateCombinedRisk(Map<String, Object> analysis, Map<String, Object> prediction) {
+        Map<String, Object> riskAssessment = new HashMap<>();
+        double ddosRisk = 0, slowlorisRisk = 0, dnsRisk = 0;
+
+        try {
+            boolean ddosDetected = (boolean) ((Map<?, ?>) analysis.get("ddos_volumetric")).get("detected");
+            boolean slowlorisDetected = (boolean) ((Map<?, ?>) analysis.get("slowloris")).get("detected");
+            boolean dnsDetected = (boolean) ((Map<?, ?>) analysis.get("dns_amplification")).get("detected");
+
+            @SuppressWarnings("unchecked")
+            Map<String, Double> probabilities = (Map<String, Double>) prediction.get("next_state_probabilities");
+
+            if (probabilities != null) {
+                ddosRisk = probabilities.getOrDefault(STATE_DDOS, 0.0);
+                slowlorisRisk = probabilities.getOrDefault(STATE_SLOWLORIS, 0.0);
+                dnsRisk = probabilities.getOrDefault(STATE_DNS_AMP, 0.0);
+
+                if (ddosDetected) ddosRisk *= 1.5;
+                if (slowlorisDetected) slowlorisRisk *= 1.5;
+                if (dnsDetected) dnsRisk *= 1.5;
+
+                double maxRisk = Math.max(ddosRisk, Math.max(slowlorisRisk, dnsRisk));
+                if (maxRisk > 0) {
+                    ddosRisk = Math.min(1, ddosRisk / maxRisk);
+                    slowlorisRisk = Math.min(1, slowlorisRisk / maxRisk);
+                    dnsRisk = Math.min(1, dnsRisk / maxRisk);
+                }
+
+                riskAssessment.put("ddos_risk", ddosRisk);
+                riskAssessment.put("slowloris_risk", slowlorisRisk);
+                riskAssessment.put("dns_amplification_risk", dnsRisk);
+                riskAssessment.put("overall_risk", (ddosRisk + slowlorisRisk + dnsRisk) / 3);
+            }
+        } catch (Exception e) {
+            logger.error("Error calculating combined risk", e);
+        }
+
+        return riskAssessment;
+    }
+
     private double calculateMedian(List<Double> values) {
         List<Double> sorted = new ArrayList<>(values);
         Collections.sort(sorted);

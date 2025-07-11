@@ -273,9 +273,10 @@ public class ExecutionsService {
 
         List<String> services = configProcessing.getDockerServices();
 
-        if(redisService.exists("logs_error_cooldown")) return;
-
         for (String service : services) {
+
+            if(redisService.exists("logs_error_cooldown:" + service)) return;
+
             Map<String, List<String>> errorLogs = dockerSwarmService.identifyErrorTasks(
                     service,
                     System.currentTimeMillis(),
@@ -308,7 +309,7 @@ public class ExecutionsService {
 
                 redisService.commentProblem(service, message, "notification");
 
-                redisService.setWithExpiry("logs_error_cooldown", "frozen", configProcessing.getWindowMinutesForLogs());
+                redisService.setWithExpiry("logs_error_cooldown:" + service, "frozen", configProcessing.getWindowMinutesForLogs());
             }
         }
     }
@@ -352,10 +353,16 @@ public class ExecutionsService {
 
         configProcessing.getDockerServices().forEach(service -> {
             try {
-
                 logger.debug("Analyzing service {} for potential attacks", service);
+
                 Map<String, Object> attackResults = attacksAnalyzer.analyzeForAttacks(service);
                 processAttackResults(service, attackResults);
+
+                Map<String, Object> predictionResults = attacksAnalyzer.predictAttackProbabilities(service);
+                processPredictionResults(service, predictionResults);
+
+                Map<String, Object> comprehensiveResults = attacksAnalyzer.getComprehensiveAnalysis(service);
+                processComprehensiveResults(service, comprehensiveResults);
 
             } catch (Exception e) {
                 logger.error("Error while monitoring service {} for attacks", service, e);
@@ -368,7 +375,6 @@ public class ExecutionsService {
         logger.info("Completed attack monitoring cycle in {} ms",
                 Duration.between(monitoringStart, Instant.now()).toMillis());
     }
-
 
     @Scheduled(fixedDelayString = "300000")
     public void predictAndScaleShortTerm() {
@@ -440,7 +446,7 @@ public class ExecutionsService {
                     double exceedanceRatio = (double) result.getOrDefault("exceedance_ratio", 0.0);
                     double trendSlope = (double) result.getOrDefault("trend_slope", 0.0);
 
-                    String severity = exceedanceRatio > 0.9 || trendSlope > 1.0 ? "critical" : "warning";
+                    String severity = exceedanceRatio > 0.9 || trendSlope > 1.0 ? "critical" : "warn";
 
                     return new AlertMessage(
                             String.format(
@@ -471,7 +477,7 @@ public class ExecutionsService {
 
                     String severity = podStats.values().stream()
                             .anyMatch(stats -> (double) stats.getOrDefault("median", 0.0) > threshold * 1.5)
-                            ? "critical" : "warning";
+                            ? "critical" : "warn";
 
                     String podDetails = podStats.entrySet().stream()
                             .map(e -> String.format("%s (median: %.1f, autocorr: %.2f)",
@@ -509,7 +515,7 @@ public class ExecutionsService {
 
                     String severity = podStats.values().stream()
                             .anyMatch(stats -> (double) stats.getOrDefault("burstiness", 0.0) > 0.9)
-                            ? "critical" : "warning";
+                            ? "critical" : "warn";
 
                     String podDetails = podStats.entrySet().stream()
                             .map(e -> String.format("%s (median: %.1f, burstiness: %.2f)",
@@ -559,7 +565,7 @@ public class ExecutionsService {
 
             if (result != null && Boolean.TRUE.equals(result.get("detected"))) {
 
-                if(redisService.exists("attackMonitoringCooldown")) return;
+                if(redisService.exists("attackMonitoringCooldown:" + service)) return;
 
                 AlertMessage alert = formatter.format(result);
                 redisService.commentProblem(
@@ -571,13 +577,116 @@ public class ExecutionsService {
                 logger.warn("{} attack detected on service {}: {}",
                         attackType, service, alert.message());
 
-                redisService.setWithExpiry("attackMonitoringCooldown", "frozen3", 10L);
+                redisService.setWithExpiry("attackMonitoringCooldown:" + service, "frozen3", 10L);
 
             } else {
                 logger.debug("No {} attack detected on service {}", attackType, service);
             }
         } catch (Exception e) {
             logger.error("Error processing {} results for service {}", attackType, service, e);
+        }
+    }
+
+    private void processPredictionResults(String service, Map<String, Object> predictionResults) {
+        if (predictionResults.containsKey("error")) {
+            logger.warn("Prediction failed for service {}: {}", service, predictionResults.get("error"));
+            return;
+        }
+
+        try {
+            String currentState = (String) predictionResults.get("current_state");
+            @SuppressWarnings("unchecked")
+            Map<String, Double> probabilities = (Map<String, Double>) predictionResults.get("next_state_probabilities");
+            String mostLikelyState = (String) predictionResults.get("most_likely_next_state");
+
+            if (!"NORMAL".equals(mostLikelyState) || probabilities.get("NORMAL") < 0.7) {
+
+                if (redisService.exists("predictionAttackMonitoringCooldown:" + service)) return;
+
+                redisService.setWithExpiry("predictionAttackMonitoringCooldown:" + service, "frozenAttack", 10L);
+
+                StringBuilder predictionMessage = new StringBuilder();
+                predictionMessage.append(String.format(
+                        "Attack prediction for %s: Current state=%s, Most likely next state=%s\nProbabilities: ",
+                        service, currentState, mostLikelyState
+                ));
+
+                probabilities.entrySet().stream()
+                        .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
+                        .forEach(entry -> {
+                            predictionMessage.append(String.format("%s=%.1f%%, ", entry.getKey(), entry.getValue() * 100));
+                        });
+
+                String severity = determinePredictionSeverity(probabilities);
+
+                redisService.commentProblem(
+                        service,
+                        predictionMessage.toString(),
+                        severity
+                );
+
+                logger.info("Attack prediction for service {}: {}", service, predictionMessage);
+            }
+        } catch (Exception e) {
+            logger.error("Error processing prediction results for service {}", service, e);
+        }
+    }
+
+    private String determinePredictionSeverity(Map<String, Double> probabilities) {
+
+        if (probabilities.values().stream().anyMatch(p -> p > 0.6)) {
+            return "critical";
+        }
+
+        if (probabilities.values().stream().anyMatch(p -> p > 0.3)) {
+            return "warn";
+        }
+        return "info";
+    }
+
+    private void processComprehensiveResults(String service, Map<String, Object> comprehensiveResults) {
+        if (comprehensiveResults.containsKey("error")) {
+            logger.warn("Comprehensive analysis failed for service {}: {}",
+                    service, comprehensiveResults.get("error"));
+            return;
+        }
+
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> riskAssessment = (Map<String, Object>)
+                    comprehensiveResults.get("risk_assessment");
+
+            if (riskAssessment != null) {
+                double overallRisk = (double) riskAssessment.getOrDefault("overall_risk", 0.0);
+
+                if (overallRisk > 0.5) {
+                    String riskMessage = String.format(
+                            "Comprehensive risk assessment for %s:\n" +
+                                    "Overall risk: %.1f%%\n" +
+                                    "DDoS risk: %.1f%%\n" +
+                                    "SlowLoris risk: %.1f%%\n" +
+                                    "DNS Amplification risk: %.1f%%",
+                            service,
+                            overallRisk * 100,
+                            (double) riskAssessment.getOrDefault("ddos_risk", 0.0) * 100,
+                            (double) riskAssessment.getOrDefault("slowloris_risk", 0.0) * 100,
+                            (double) riskAssessment.getOrDefault("dns_amplification_risk", 0.0) * 100
+                    );
+
+                    String severity = overallRisk > 0.7 ? "critical" :
+                            overallRisk > 0.4 ? "warn" : "info";
+
+                    redisService.commentProblem(
+                            service,
+                            riskMessage,
+                            severity
+                    );
+
+                    logger.info("Risk assessment for service {}: {}", service, riskMessage);
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error processing comprehensive results for service {}", service, e);
         }
     }
 
