@@ -5,7 +5,6 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.*;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
@@ -56,23 +55,6 @@ public class DockerSwarmService {
 
         } catch (Exception e) {
             throw new RuntimeException("Failed to scale service", e);
-        }
-    }
-
-    public OffsetDateTime getLastDeploymentDateForService(String serviceName) {
-        try {
-            return dockerClient.listServicesCmd()
-                    .withNameFilter(Collections.singletonList(serviceName))
-                    .exec()
-                    .stream()
-                    .findFirst()
-                    .map(service -> {
-                        long updatedAt = service.getUpdatedAt().getSeconds() * 1000;
-                        return OffsetDateTime.ofInstant(Instant.ofEpochMilli(updatedAt), ZoneId.systemDefault());
-                    })
-                    .orElseThrow(() -> new IllegalArgumentException("Service not found"));
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to get deployment date", e);
         }
     }
 

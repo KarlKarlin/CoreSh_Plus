@@ -250,30 +250,41 @@ public class AttacksAnalyzer {
         Map<String, Object> result = new HashMap<>();
         String fieldName = detectionFields.get("request_rate");
 
-        List<Double> shortWindowRates = metricsProcessing.getMetricsInTimeWindow(
-                "request_rate", fieldName, serviceName, SHORT_WINDOW_MINUTES);
-        List<Double> longWindowRates = metricsProcessing.getMetricsInTimeWindow(
+        Map<String, Map<Instant, Double>> podMetrics = metricsProcessing.getMetricsByPod(
                 "request_rate", fieldName, serviceName, LONG_WINDOW_MINUTES);
 
-        if (shortWindowRates.size() < MIN_DATA_POINTS_FOR_ANALYSIS ||
-                longWindowRates.size() < MIN_DATA_POINTS_FOR_ANALYSIS) {
+        if (podMetrics.isEmpty()) {
+            result.put("detected", false);
+            result.put("reason", "No data available");
+            return result;
+        }
+
+        List<Double> allValues = podMetrics.values().stream()
+                .flatMap(m -> m.values().stream())
+                .collect(Collectors.toList());
+
+        if (allValues.size() < MIN_DATA_POINTS_FOR_ANALYSIS) {
             result.put("detected", false);
             result.put("reason", "Insufficient data points");
             return result;
         }
 
-        double shortWindowMedian = calculateMedian(shortWindowRates);
-        double longWindowMedian = calculateMedian(longWindowRates);
-        double mad = calculateMAD(longWindowRates, longWindowMedian);
-        double threshold = longWindowMedian + (3.5 * mad);
-        double exceedanceRatio = shortWindowRates.stream()
+        List<Double> recentValues = getRecentValues(podMetrics, SHORT_WINDOW_MINUTES);
+
+        double baselineMedian = calculateMedian(allValues);
+        double recentMedian = calculateMedian(recentValues);
+        double mad = calculateMAD(allValues, baselineMedian);
+        double threshold = baselineMedian + (3.5 * mad);
+
+        double exceedanceRatio = recentValues.stream()
                 .filter(rate -> rate > threshold)
-                .count() / (double) shortWindowRates.size();
-        double trendSlope = calculateTrendSlope(shortWindowRates);
+                .count() / (double) recentValues.size();
+
+        double trendSlope = calculateTrendSlope(recentValues);
 
         result.put("detected", exceedanceRatio > 0.7 || trendSlope > 0.5);
-        result.put("current_median_rate", shortWindowMedian);
-        result.put("baseline_median_rate", longWindowMedian);
+        result.put("current_median_rate", recentMedian);
+        result.put("baseline_median_rate", baselineMedian);
         result.put("mad", mad);
         result.put("threshold", threshold);
         result.put("exceedance_ratio", exceedanceRatio);
@@ -361,11 +372,18 @@ public class AttacksAnalyzer {
     private Map<String, Object> performStatisticalAnalysis(String serviceName) {
         Map<String, Object> analysisResults = new HashMap<>();
         String rateField = detectionFields.get("request_rate");
-        List<Double> rates = metricsProcessing.getMetricsInTimeWindow(
+
+        Map<String, Map<Instant, Double>> rateData = metricsProcessing.getMetricsByPod(
                 "request_rate", rateField, serviceName, LONG_WINDOW_MINUTES);
 
-        if (rates.size() >= MIN_DATA_POINTS_FOR_ANALYSIS) {
-            analysisResults.put("request_rate_analysis", analyzeTimeSeries(rates));
+        if (!rateData.isEmpty()) {
+            List<Double> allRates = rateData.values().stream()
+                    .flatMap(m -> m.values().stream())
+                    .collect(Collectors.toList());
+
+            if (allRates.size() >= MIN_DATA_POINTS_FOR_ANALYSIS) {
+                analysisResults.put("request_rate_analysis", analyzeTimeSeries(allRates));
+            }
         }
 
         String connField = detectionFields.get("open_connections");
@@ -630,5 +648,14 @@ public class AttacksAnalyzer {
         return values.stream()
                 .mapToDouble(v -> Math.pow(v - mean, 2))
                 .average().orElse(0);
+    }
+
+    private List<Double> getRecentValues(Map<String, Map<Instant, Double>> podMetrics, int minutes) {
+        Instant cutoff = Instant.now().minusSeconds(minutes * 60L);
+        return podMetrics.values().stream()
+                .flatMap(m -> m.entrySet().stream()
+                        .filter(e -> e.getKey().isAfter(cutoff))
+                        .map(Map.Entry::getValue))
+                .collect(Collectors.toList());
     }
 }

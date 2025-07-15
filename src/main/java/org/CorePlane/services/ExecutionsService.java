@@ -7,6 +7,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -399,7 +400,8 @@ public class ExecutionsService {
                         5
                 );
 
-                if (shouldScale(currentPods, requiredPods)) {
+                if (shouldScale(currentPods, requiredPods) && redisService.getProtectedReplicasCount(service) < requiredPods) {
+                    if (redisService.exists("scalingCooldown:" + service)) return;
                     scaleService(service, currentPods, requiredPods);
                 }
             } catch (Exception e) {
@@ -408,6 +410,56 @@ public class ExecutionsService {
                         "Scaling error: " + e.getMessage(), "error");
             }
         });
+    }
+
+    @Scheduled(cron = "0 0 0 * * *")
+    public void scaleServiceForExceptionalDay() {
+
+            Map<LocalDate, ConfigProcessing.EventConfig> events = configProcessing.getEventDatesConfig();
+            LocalDate today = LocalDate.now();
+
+            if (events.containsKey(today)) {
+                ConfigProcessing.EventConfig eventConfig = events.get(today);
+                int visitors = eventConfig.getTotalExpectedVisitors();
+                double rpsPerUser = eventConfig.getAvgRequestsPerSecondPerUser();
+                int unitsPerPod = configProcessing.unitsPerPod();
+
+                List<String> services = configProcessing.getDockerServices();
+
+                for (String service : services) {
+                    try {
+                        int maxAllowed = configProcessing.getMaxReplicasForService(service);
+                        int minAllowed = configProcessing.getMinReplicasForService(service);
+                        int currentReplicas = redisService.getProtectedReplicasCount(service);
+
+                        double peakHourTraffic = visitors * 0.2;
+                        double desiredReplicasUnbounded = (peakHourTraffic * rpsPerUser) / (unitsPerPod * 3600);
+                        int desiredReplicas = (int) Math.max(minAllowed,
+                                Math.min(maxAllowed, Math.ceil(desiredReplicasUnbounded)));
+
+                        if (desiredReplicas > currentReplicas) {
+
+                            dockerSwarmService.scaleUpService(service, desiredReplicas);
+                            redisService.setProtectedReplicasCount(desiredReplicas, service);
+
+                            String message = String.format("""
+                                            **Service:** %s
+                                            **Current Replicas:** %d
+                                            **Desired Replicas:** %d
+                                            **Calculation:** (Visitors: %d * RPS/User: %.1f) / (Units/Pod: %d * 3600) * Peak Factor
+                                            **Date:** %s
+                                            """,
+                                    service, currentReplicas, desiredReplicas,
+                                    visitors, rpsPerUser, unitsPerPod, today);
+
+                            redisService.commentProblem(service, message, "notification");
+                        }
+                    } catch (Exception e) {
+                        redisService.commentProblem(service,
+                                "Automatic scaling failed: " + e.getMessage(), "error");
+                    }
+                }
+            }
     }
 
     private boolean shouldScale(int current, int recommended) {

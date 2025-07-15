@@ -5,6 +5,7 @@ import org.yaml.snakeyaml.Yaml;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -152,9 +153,18 @@ public class ConfigProcessing {
     }
 
     public int getMetricWindowMinutes(String metric) {
-        Map<String, Object> config = getConfigFromYaml();
-        Map<String, Object> metricsConfig = (Map<String, Object>) config.getOrDefault("metrics_config", new HashMap<>());
-        return (int) metricsConfig.getOrDefault(metric + ".window_minutes", 5);
+        try {
+
+            Map<String, Object> config = getConfigFromYaml();
+
+            Map<String, Object> metricsConfig = (Map<String, Object>) config.getOrDefault("metrics_config", new HashMap<>());
+
+            Map<String, Object> metricConfig = (Map<String, Object>) metricsConfig.getOrDefault(metric, new HashMap<>());
+
+            return (int) metricConfig.getOrDefault("window_minutes", 5);
+        } catch (Exception e) {
+            return 5;
+        }
     }
 
     public int getSpikeNotificationThreshold() {
@@ -209,5 +219,49 @@ public class ConfigProcessing {
         thresholdConfig.forEach((key, value) -> thresholds.put(key, Integer.parseInt(value.toString())));
 
         return thresholds;
+    }
+
+    public Map<LocalDate, EventConfig> getEventDatesConfig() {
+        Map<String, Object> data = getConfigFromYaml();
+        Map<String, Object> events = (Map<String, Object>) data.getOrDefault("Exceptions", new HashMap<>());
+        Map<LocalDate, EventConfig> result = new HashMap<>();
+
+        for (Map.Entry<String, Object> entry : events.entrySet()) {
+            try {
+
+                String dateStr = entry.getKey().toString().replace('.', '-');
+
+                String[] parts = dateStr.split("-");
+                int day = Integer.parseInt(parts[0]);
+                int month = Integer.parseInt(parts[1]);
+                int year = LocalDate.now().getYear();
+
+                LocalDate date = LocalDate.of(year, month, day);
+
+                Map<String, Object> eventData = (Map<String, Object>) entry.getValue();
+                EventConfig config = new EventConfig(
+                        ((Number) eventData.getOrDefault("total_expected_visitors", 0)).intValue(),
+                        ((Number) eventData.getOrDefault("average_requests_per_second_per_user", 0.0)).doubleValue()
+                );
+
+                result.put(date, config);
+            } catch (Exception e) {
+                System.err.println("Error parsing event date " + entry.getKey() + ": " + e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    public static class EventConfig {
+        private final int totalExpectedVisitors;
+        private final double avgRequestsPerSecondPerUser;
+
+        public EventConfig(int totalExpectedVisitors, double avgRequestsPerSecondPerUser) {
+            this.totalExpectedVisitors = totalExpectedVisitors;
+            this.avgRequestsPerSecondPerUser = avgRequestsPerSecondPerUser;
+        }
+
+        public int getTotalExpectedVisitors() { return totalExpectedVisitors; }
+        public double getAvgRequestsPerSecondPerUser() { return avgRequestsPerSecondPerUser; }
     }
 }
