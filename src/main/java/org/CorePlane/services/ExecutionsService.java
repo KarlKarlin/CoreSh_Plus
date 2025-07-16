@@ -677,6 +677,14 @@ public class ExecutionsService {
                         severity
                 );
 
+                if (redisService.exists("ipRotationCooldown:" + service)) {
+                    return;
+                }
+
+                dockerSwarmService.rotateServiceIP(service);
+
+                redisService.setWithExpiry("ipRotationCooldown:" + service, "1", 300);
+
                 logger.info("Attack prediction for service {}: {}", service, predictionMessage);
             }
         } catch (Exception e) {
@@ -733,6 +741,14 @@ public class ExecutionsService {
                             riskMessage,
                             severity
                     );
+
+                    if (redisService.exists("emergencyRestartService:" + service)) {
+                        return;
+                    }
+
+                    dockerSwarmService.emergencyRestartService(service);
+
+                    redisService.setWithExpiry("emergencyRestartService:" + service, "1", 300);
 
                     logger.info("Risk assessment for service {}: {}", service, riskMessage);
                 }

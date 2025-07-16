@@ -343,4 +343,70 @@ public class DockerSwarmService {
             throw new RuntimeException("Failed to get crashed container IDs", e);
         }
     }
+
+    public void rotateServiceIP(String serviceName) {
+        try {
+
+            List<Service> services = dockerClient.listServicesCmd()
+                    .withNameFilter(Collections.singletonList(serviceName))
+                    .exec();
+
+            if (services.isEmpty()) {
+                throw new RuntimeException("Service not found: " + serviceName);
+            }
+
+            Service service = services.get(0);
+
+            ServiceSpec spec = new ServiceSpec()
+                    .withName(service.getSpec().getName())
+                    .withTaskTemplate(service.getSpec().getTaskTemplate())
+                    .withMode(service.getSpec().getMode())
+                    .withUpdateConfig(service.getSpec().getUpdateConfig())
+                    .withEndpointSpec(service.getSpec().getEndpointSpec());
+
+            if (service.getSpec().getLabels() != null) {
+                spec.withLabels(new HashMap<>(service.getSpec().getLabels()));
+            } else {
+                spec.withLabels(new HashMap<>());
+            }
+
+            spec.getLabels().put("last-rotated", String.valueOf(System.currentTimeMillis()));
+
+            dockerClient.updateServiceCmd(service.getId(), spec)
+                    .withVersion(service.getVersion().getIndex())
+                    .exec();
+
+        } catch (Exception e) {
+            throw new RuntimeException("IP rotation failed for service: " + serviceName, e);
+        }
+    }
+
+    public void emergencyRestartService(String serviceName) {
+        try {
+
+            List<Service> services = dockerClient.listServicesCmd()
+                    .withNameFilter(Collections.singletonList(serviceName))
+                    .exec();
+
+            if (services.isEmpty()) {
+                throw new RuntimeException("Service not found: " + serviceName);
+            }
+
+            Service service = services.get(0);
+
+            ServiceSpec newSpec = new ServiceSpec()
+                    .withName(service.getSpec().getName())
+                    .withTaskTemplate(service.getSpec().getTaskTemplate())
+                    .withMode(service.getSpec().getMode())
+                    .withUpdateConfig(service.getSpec().getUpdateConfig())
+                    .withEndpointSpec(service.getSpec().getEndpointSpec())
+                    .withLabels(service.getSpec().getLabels());
+
+            dockerClient.removeServiceCmd(service.getId()).exec();
+            dockerClient.createServiceCmd(newSpec).exec();
+
+        } catch (Exception e) {
+            throw new RuntimeException("Emergency restart failed for service: " + serviceName, e);
+        }
+    }
 }
