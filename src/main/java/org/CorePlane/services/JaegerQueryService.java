@@ -112,7 +112,6 @@ public class JaegerQueryService {
             return new ErrorTraceInfo(traceId, "unknown", "No trace data found", null);
         }
 
-        // Get first process's service name
         Iterator<Map.Entry<String, JsonNode>> processes = traceData.path("processes").fields();
         String serviceName = processes.hasNext() ?
                 processes.next().getValue().path("serviceName").asText() : "unknown";

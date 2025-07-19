@@ -683,7 +683,7 @@ public class ExecutionsService {
 
                 dockerSwarmService.rotateServiceIP(service);
 
-                redisService.setWithExpiry("ipRotationCooldown:" + service, "1", 300);
+                redisService.setWithExpiry("ipRotationCooldown:" + service, "1", 30);
 
                 logger.info("Attack prediction for service {}: {}", service, predictionMessage);
             }
@@ -748,7 +748,7 @@ public class ExecutionsService {
 
                     dockerSwarmService.emergencyRestartService(service);
 
-                    redisService.setWithExpiry("emergencyRestartService:" + service, "1", 300);
+                    redisService.setWithExpiry("emergencyRestartService:" + service, "1", 30);
 
                     logger.info("Risk assessment for service {}: {}", service, riskMessage);
                 }
@@ -781,7 +781,7 @@ public class ExecutionsService {
         String[] parts = metric.split("\\.");
         String measurement = parts[0];
 
-        MetricProcessing.cleanupInactiveHosts(measurement, service, 30);
+        MetricProcessing.cleanupInactiveHosts(measurement, service, 10);
     }
 
     private void sendScalingNotification(String service, int currentReplicas, int newReplicas,

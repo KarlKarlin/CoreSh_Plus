@@ -128,26 +128,14 @@ public class MetricsProcessing {
 
             List<Double> summedValues = new ArrayList<>();
             if (!allPoints.isEmpty()) {
-                Instant currentBucketTime = allPoints.get(0).getTime();
-                double currentSum = 0;
-                int pointsInBucket = 0;
+                Map<Long, Double> timeBuckets = new TreeMap<>();
 
                 for (MetricPoint point : allPoints) {
-                    if (Math.abs(point.getTime().toEpochMilli() - currentBucketTime.toEpochMilli()) <= timestampTolerance) {
-                        currentSum += point.getValue();
-                        pointsInBucket++;
-                    } else {
-                        if (pointsInBucket > 0) {
-                            summedValues.add(currentSum);
-                        }
-                        currentBucketTime = point.getTime();
-                        currentSum = point.getValue();
-                        pointsInBucket = 1;
-                    }
+                    long bucketTime = (point.getTime().toEpochMilli() / timestampTolerance) * timestampTolerance;
+                    timeBuckets.merge(bucketTime, point.getValue(), Double::sum);
                 }
-                if (pointsInBucket > 0) {
-                    summedValues.add(currentSum);
-                }
+
+                summedValues = new ArrayList<>(timeBuckets.values());
             }
 
             return summedValues;
@@ -314,24 +302,6 @@ public class MetricsProcessing {
         return podMetrics;
     }
 
-    private static class MetricPoint {
-        private final Instant time;
-        private final double value;
-
-        public MetricPoint(Instant time, double value) {
-            this.time = time;
-            this.value = value;
-        }
-
-        public Instant getTime() {
-            return time;
-        }
-
-        public double getValue() {
-            return value;
-        }
-    }
-
     private static class LoadPrediction {
         final double avgCurrentLoad;
         final double avgPredictedLoad;
@@ -342,5 +312,18 @@ public class MetricsProcessing {
             this.avgPredictedLoad = avgPredictedLoad;
             this.peakPredictedLoad = peakPredictedLoad;
         }
+    }
+
+    private static class MetricPoint {
+        private final Instant time;
+        private final double value;
+
+        public MetricPoint(Instant time, double value) {
+            this.time = time;
+            this.value = value;
+        }
+
+        public Instant getTime() { return time; }
+        public double getValue() { return value; }
     }
 }

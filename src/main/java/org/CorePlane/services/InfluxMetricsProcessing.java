@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class InfluxMetricsProcessing {
     private static final Logger logger = LoggerFactory.getLogger(InfluxMetricsProcessing.class);
 
-    private static final double DOWNSCALE_THRESHOLD_RATIO = 0.3;
+    private static final double DOWNSCALE_THRESHOLD_RATIO = 0.6;
     private static final double SCALE_UP_BUFFER_RATIO = 0.2;
     private static final int MIN_SCALE_UP_COOLDOWN = 1;
     private static final int MAX_SCALE_UP_COOLDOWN = 3;
@@ -361,15 +361,26 @@ public class InfluxMetricsProcessing {
             List<Double> metricsValues = metricsProcessing.getMetricsInTimeWindow(
                     measurement, field, serviceName, 60);
 
-            return metricsValues.stream()
+            if (metricsValues.isEmpty()) {
+                logger.warn("No metrics found for {}:{} in service {} in last hour",
+                        measurement, field, serviceName);
+                return Double.NaN;
+            }
+
+            double maxValue = metricsValues.stream()
                     .mapToDouble(Double::doubleValue)
                     .max()
-                    .orElse(0.0);
+                    .getAsDouble();
+
+            logger.debug("Max value for {}:{} in {}: {}",
+                    measurement, field, serviceName, maxValue);
+
+            return maxValue;
 
         } catch (Exception e) {
             logger.error("Error getting max metric for {}:{} in {}: {}",
-                    measurement, field, serviceName, e.getMessage());
-            return 0.0;
+                    measurement, field, serviceName, e.getMessage(), e);
+            throw new RuntimeException("Failed to get max metric value", e);
         }
     }
 
