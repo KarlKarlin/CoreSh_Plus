@@ -46,10 +46,6 @@ public class RedisService {
         return 0;
     }
 
-    public void clearBiggestValueForMetric(String metric, String service) {
-        stringRedisTemplate.delete("metrics:biggestValue:" + metric + ":" + service);
-    }
-
     public void trackServiceDeployment(String serviceName) {
         DockerSwarmService.ServiceVersion version = dockerSwarmService.getCurrentServiceVersion(serviceName);
         String historyKey = String.format(VERSION_HISTORY_KEY, serviceName);

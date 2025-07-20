@@ -89,8 +89,7 @@ public class InfluxMetricsProcessing {
         if (values.size() <= 3) {
             return values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
         }
-        values.sort(Double::compare);
-        return values.get(values.size() / 2);
+        return values.get(values.size() - 1);
     }
 
     private void checkForMetricSpike(MetricAnalysis analysis) {
