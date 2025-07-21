@@ -1,5 +1,7 @@
 package org.CorePlane.configurations;
 
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -19,14 +21,27 @@ public class LicenseCheck {
     private final RedisTemplate<String, Object> redisTemplate;
     private final StringRedisTemplate stringRedisTemplate;
 
-    private static final String KEYGEN_ACCOUNT_ID = "904c91fb-38c5-40bd-9d77-355c42e6e6d6";
-    private static final String KEYGEN_API_URL = "https://api.keygen.sh/v1/accounts/" + KEYGEN_ACCOUNT_ID + "/licenses/actions/validate-key";
-    private static final String KEYGEN_API_TOKEN = "Bearer prod-7196976091f2a14ae35e0e0010b30eed15647fea5670138c577184ccdf1a3f5fv3";
-    private static final String PRODUCT_ID = "dade50f0-70ba-41b0-b59f-e96e45223b6d";
+    @Value("${keygen.account.id}")
+    private String KEYGEN_ACCOUNT_ID;
+
+    private String KEYGEN_API_URL;
+
+    @Value("${keygen.api.token}")
+    private String KEYGEN_API_TOKEN;
+
+    @Value("${keygen.product.id}")
+    private String PRODUCT_ID;
 
     private static final String LICENSE_CACHE_PREFIX = "license:v2:";
     private static final String LICENSE_HMAC_PREFIX = "license:hmac:";
-    private static final String SECRET_HMAC_KEY = "pX42WeLz*2qY@wV1%4(7&mN5^cC8(h43#";
+
+    @Value("${keygen.secret.hmac.key}")
+    private String SECRET_HMAC_KEY;
+
+    @PostConstruct
+    public void init() {
+        this.KEYGEN_API_URL = "https://api.keygen.sh/v1/accounts/" + KEYGEN_ACCOUNT_ID + "/licenses/actions/validate-key";
+    }
 
     public LicenseCheck(RestTemplate restTemplate,
                         RedisTemplate<String, Object> redisTemplate,
