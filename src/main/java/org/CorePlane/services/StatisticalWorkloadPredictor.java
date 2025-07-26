@@ -10,7 +10,7 @@ public class StatisticalWorkloadPredictor implements WorkloadPredictor {
     private final RedisService redisService;
     private final ConfigProcessing configProcessing;
     private final DockerSwarmService dockerSwarmService;
-    public final int analysisWindowSize;
+    protected final int analysisWindowSize;
     private final double smoothingFactor;
     private final double predictionPercentile;
     private final double scalingBufferFactor;
